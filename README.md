@@ -101,12 +101,12 @@ By default, runtime artifacts are under `.zhuge-loop/`:
 - `.zhuge-loop/logs/turn-*/`: per-turn context, stdout/stderr, and result summary.
 - `.zhuge-loop/HALT.log`: records failure-fuse halts.
 
-## OpenClaw as bridge
+## Standalone first
 
-OpenClaw is a useful control bridge, but Zhuge Loop is intentionally standalone.
-Use OpenClaw as an adapter command in phases, not as a hard runtime dependency.
+Zhuge Loop runs without OpenClaw or any specific agent framework.
+The runtime only needs shell commands in your profile phases.
 
-Example adapter config: `examples/openclaw-bridge.zhuge.config.json`
+If your commands can run in terminal, they can run in Zhuge Loop.
 
 ## Methodology docs
 
@@ -137,4 +137,18 @@ node src/cli.js run --once
 node src/cli.js run
 ```
 
-如果你已經用 OpenClaw 控制流程，可以把 OpenClaw 指令放進 phase command，當作橋接層，不需要把核心 loop 綁死在 OpenClaw 裡。
+這個工具本身不依賴 OpenClaw。只要 phase 裡放可執行的 shell 指令，就能跑。
+
+---
+
+## Optional integration: OpenClaw bridge
+
+If you already use OpenClaw as your control plane, plug it in as phase commands only.
+Zhuge Loop remains the runtime/orchestrator.
+
+Example config: `examples/openclaw-bridge.zhuge.config.json`
+
+## 進階整合：OpenClaw 橋接（可選）
+
+若你已經用 OpenClaw 做控制面，可以把 OpenClaw 指令填進 phase command。
+核心 orchestrator 仍然是 Zhuge Loop，不會被綁定在 OpenClaw。
