@@ -1,0 +1,24 @@
+{
+  "name": "zhuge-loop",
+  "version": "0.1.0",
+  "description": "Always-on autonomous development loop with lock, recovery, and auditable turn logs.",
+  "type": "module",
+  "bin": {
+    "zhuge-loop": "./src/cli.js"
+  },
+  "scripts": {
+    "loop": "node ./src/cli.js run",
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
+  },
+  "keywords": [
+    "autonomous",
+    "agent-loop",
+    "orchestrator",
+    "devtools",
+    "zhuge"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "zhuge-loop-with-openclaw-bridge",
+  "repoDir": "..",
+  "sleepMs": 120000,
+  "maxConsecutiveFailures": 3,
+  "keepRecentTurns": 30,
+  "profileRotation": ["playability", "maintainability", "playability"],
+  "profiles": {
+    "playability": {
+      "description": "Use OpenClaw as bridge for execution commands",
+      "phases": [
+        {
+          "id": "coordinator",
+          "command": "openclaw run --agent zhuge --mode coordinator",
+          "timeoutMs": 600000,
+          "allowFailure": false
+        },
+        {
+          "id": "executor",
+          "command": "openclaw run --agent zhaoyun --mode executor",
+          "timeoutMs": 1200000,
+          "allowFailure": false
+        },
+        {
+          "id": "verify",
+          "command": "npm test",
+          "timeoutMs": 900000,
+          "allowFailure": false
+        }
+      ]
+    },
+    "maintainability": {
+      "description": "Refactor hardening profile",
+      "phases": [
+        {
+          "id": "director",
+          "command": "openclaw run --agent guanyu --mode director",
+          "timeoutMs": 600000,
+          "allowFailure": false
+        },
+        {
+          "id": "executor",
+          "command": "openclaw run --agent zhangfei --mode executor",
+          "timeoutMs": 1200000,
+          "allowFailure": false
+        },
+        {
+          "id": "verify",
+          "command": "npm test",
+          "timeoutMs": 900000,
+          "allowFailure": false
+        }
+      ]
+    }
+  }
+}

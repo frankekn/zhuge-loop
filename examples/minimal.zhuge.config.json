@@ -1,0 +1,27 @@
+{
+  "name": "minimal-zhuge-loop",
+  "repoDir": "..",
+  "sleepMs": 60000,
+  "maxConsecutiveFailures": 3,
+  "keepRecentTurns": 20,
+  "profileRotation": ["default"],
+  "profiles": {
+    "default": {
+      "description": "Minimal local smoke profile",
+      "phases": [
+        {
+          "id": "plan",
+          "command": "echo '[plan] choose the smallest slice'",
+          "timeoutMs": 600000,
+          "allowFailure": false
+        },
+        {
+          "id": "verify",
+          "command": "node -e \"console.log('ok')\"",
+          "timeoutMs": 600000,
+          "allowFailure": false
+        }
+      ]
+    }
+  }
+}
