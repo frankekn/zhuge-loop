@@ -1,0 +1,91 @@
+# CLAUDE.md -- Agent 指引
+
+> 此檔案引導 AI agent 理解專案背景與工作規範。
+> 每位 agent 在 turn 開始時應先讀取此檔案，確認當前階段 (phase) 的行為要求。
+
+---
+
+## 專案背景 / Project Context
+
+- **專案名稱**: {{PROJECT_NAME}}
+- **簡述**: {{PROJECT_DESCRIPTION}}
+- **主要語言**: {{LANGUAGE}}
+- **套件管理**: {{PACKAGE_MANAGER}}
+
+---
+
+## 架構概覽 / Architecture Overview
+
+{{ARCHITECTURE_OVERVIEW}}
+
+<!-- 範例：
+- `src/` -- 核心邏輯
+- `tests/` -- 測試
+- `scripts/` -- 輔助腳本
+- `docs/` -- 文件
+-->
+
+---
+
+## 編碼規範 / Coding Standards
+
+1. **Follow existing patterns** -- 先讀現有程式碼再動手，保持風格一致。
+2. **Run tests before committing** -- 每次 commit 前必須通過所有測試。
+3. **Keep changes small and focused** -- 一輪只解決一個問題，不做 drive-by refactor。
+4. **One concern per commit** -- 每個 commit 只處理一件事，方便追查和 revert。
+5. **No guessing** -- 不確定的行為，先讀程式碼或文件確認，不要猜測。
+6. **Fail fast** -- 遇到錯誤立即暴露，不要吞掉 exception 或默默跳過。
+
+---
+
+## 環境變數 / Environment Variables
+
+Zhuge Loop 在執行每個 phase 時會注入以下環境變數：
+
+| 變數 | 說明 | 範例值 |
+|------|------|--------|
+| `ZHUGE_TURN` | 當前輪次編號 (從 0 開始遞增) | `"42"` |
+| `ZHUGE_PROFILE` | 當前 turn 使用的 profile 名稱 | `"zhaoyun"` |
+| `ZHUGE_PHASE` | 當前正在執行的 phase ID | `"implement"` |
+
+Agent 可透過這些變數判斷自己的身份與工作階段，並據此調整行為。
+
+---
+
+## 各階段行為指引 / Phase Behavior
+
+### plan
+
+- 讀取上一輪的 handoff note (`.zhuge-loop/logs/` 中最新的 `result.md`)。
+- 確認待辦任務清單，選出本輪要處理的最小可交付切片。
+- 產出明確的 plan：做什麼、改哪些檔案、預期驗證方式。
+- 不要在 plan 階段修改程式碼。
+
+### implement
+
+- 嚴格依照 plan 執行，不做 plan 沒提到的事。
+- 如果 plan 有明顯錯誤，在 handoff note 中記錄問題，但仍嘗試完成可行的部分。
+- 每完成一個邏輯單位就 commit，附帶清楚的 commit message。
+- 確保修改範圍與 plan 一致，不要順手修改不相關的檔案。
+
+### verify
+
+- 執行專案的測試套件，確認所有測試通過。
+- 執行 lint / type check（若專案有設定）。
+- 如果有失敗，在 handoff note 中記錄失敗原因和建議修復方式。
+- 不要在 verify 階段修改程式碼，只做檢查和報告。
+
+---
+
+## Handoff 機制
+
+每輪結束時，agent 應將成果和待辦事項寫入 handoff note，供下一輪的 agent 讀取。
+格式參考 `starters/handoff.md.template`。
+
+---
+
+## 停機與恢復
+
+- 連續失敗達到 `maxConsecutiveFailures` 時，loop 會自動熔斷停機。
+- 停機原因記錄在 `.zhuge-loop/HALT.log`。
+- 修復問題後，直接重新執行 `npx zhuge-loop run` 即可繼續。

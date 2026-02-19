@@ -1,0 +1,61 @@
+{
+  "name": "multi-team-pipeline",
+  "repoDir": "../..",
+  "sleepMs": 120000,
+  "maxConsecutiveFailures": 3,
+  "keepRecentTurns": 50,
+  "profileRotation": ["zhuge", "zhaoyun", "zhaoyun", "guanyu"],
+  "profiles": {
+    "zhuge": {
+      "description": "Zhuge Liang (coordinator): break the backlog into shippable slices and decide what to tackle next",
+      "phases": [
+        {
+          "id": "plan",
+          "command": "echo '[zhuge/plan] Reading TASKS.md and git log to break the current goal into small, testable slices. Output: updated TASKS.md with numbered slices.'",
+          "timeoutMs": 600000,
+          "allowFailure": false
+        },
+        {
+          "id": "prioritize",
+          "command": "echo '[zhuge/prioritize] Selecting the highest-value unfinished slice from TASKS.md. Writing the slice spec to .zhuge-loop/current-slice.md for the executor.'",
+          "timeoutMs": 300000,
+          "allowFailure": false
+        }
+      ]
+    },
+    "zhaoyun": {
+      "description": "Zhao Yun (executor): implement the current slice and verify it passes tests",
+      "phases": [
+        {
+          "id": "implement",
+          "command": "echo '[zhaoyun/implement] Reading .zhuge-loop/current-slice.md and applying code changes. Committing with a descriptive message when done.'",
+          "timeoutMs": 1200000,
+          "allowFailure": false
+        },
+        {
+          "id": "test",
+          "command": "echo '[zhaoyun/test] Running the project test suite to verify the implementation. Exit non-zero if any test fails.'",
+          "timeoutMs": 900000,
+          "allowFailure": false
+        }
+      ]
+    },
+    "guanyu": {
+      "description": "Guan Yu (reviewer): review recent changes for quality and write a summary report",
+      "phases": [
+        {
+          "id": "review",
+          "command": "echo '[guanyu/review] Reviewing the last 2 commits for correctness, style, and test coverage. Flagging issues in .zhuge-loop/review-notes.md.'",
+          "timeoutMs": 600000,
+          "allowFailure": false
+        },
+        {
+          "id": "report",
+          "command": "echo '[guanyu/report] Writing a review summary to .zhuge-loop/review-report.md. Marking the slice as approved or requesting rework.'",
+          "timeoutMs": 300000,
+          "allowFailure": false
+        }
+      ]
+    }
+  }
+}

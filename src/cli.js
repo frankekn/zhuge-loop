@@ -1,23 +1,46 @@
 #!/usr/bin/env node
+import { createInterface } from 'node:readline/promises'
+import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { loadConfig, writeSampleConfig } from './config.js'
+import {
+  loadConfig,
+  writeSampleConfig,
+  detectProjectType,
+  testCommandForProjectType,
+  patchVerifyCommand,
+  PRESETS,
+} from './config.js'
 import { runLoop } from './loop.js'
 import { runCommand } from './runner.js'
+import { mkdirp } from './utils.js'
 
 function printHelp() {
   console.log(`
-Zhuge Loop
+Zhuge Loop - agent loop runtime with Three Kingdoms methodology
 
 Usage:
-  zhuge-loop init [--config <path>]
+  zhuge-loop quickstart                     Detect, configure, and run first turn
+  zhuge-loop init [--preset <name>]         Interactive setup or preset config
   zhuge-loop run [--config <path>] [--once]
-  zhuge-loop doctor [--config <path>]
+  zhuge-loop doctor [--config <path>] [--strict]
+
+Presets:
+  zhuge-solo    One agent, three phases (default)
+  zhuge-team    Three agents rotating (zhuge/zhaoyun/guanyu)
+  node-lib      Node.js library (npm test)
+  react-vite    React / Vite (npx vitest run)
+  python        Python (pytest)
+  generic       Generic (echo ok)
+  claude-code   Claude Code CLI
+  kiro          Kiro CLI
 
 Examples:
+  zhuge-loop quickstart
   zhuge-loop init
+  zhuge-loop init --preset zhuge-team
   zhuge-loop run --once
-  zhuge-loop run --config ./examples/minimal.zhuge.config.json
+  zhuge-loop doctor --strict
 `)
 }
 
@@ -30,12 +53,21 @@ function parseArgs(argv) {
       i += 1
       continue
     }
+    if (item === '--preset') {
+      args.preset = argv[i + 1]
+      i += 1
+      continue
+    }
     if (item === '--once') {
       args.once = true
       continue
     }
     if (item === '--force') {
       args.force = true
+      continue
+    }
+    if (item === '--strict') {
+      args.strict = true
       continue
     }
     args._.push(item)
@@ -51,8 +83,136 @@ function quoteForShell(input) {
   return `'${String(input).replace(/'/g, `'"'"'`)}'`
 }
 
-async function runDoctor(config) {
+async function runInitWizard(repoDir) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  const detected = await detectProjectType(repoDir)
+  const typeChoices = [
+    { label: 'Node.js (npm test)', value: 'node-lib' },
+    { label: 'Python (pytest)', value: 'python' },
+    { label: 'React / Vite (npx vitest run)', value: 'react-vite' },
+    { label: 'Generic (echo ok)', value: 'generic' },
+  ]
+  const defaultTypeIndex = typeChoices.findIndex((c) => c.value === detected)
+  const defaultNum = defaultTypeIndex >= 0 ? defaultTypeIndex + 1 : 1
+
+  console.log('\n  Project type:')
+  for (let i = 0; i < typeChoices.length; i += 1) {
+    console.log(`  ${i + 1}) ${typeChoices[i].label}`)
+  }
+  const typeAnswer = await rl.question(`  Choice [${defaultNum}]: `)
+  const typeIndex = (parseInt(typeAnswer.trim(), 10) || defaultNum) - 1
+  const selectedType = typeChoices[Math.max(0, Math.min(typeIndex, typeChoices.length - 1))].value
+
+  const defaultTestCmd = testCommandForProjectType(selectedType)
+  const testCmdAnswer = await rl.question(`\n  Test command [${defaultTestCmd}]: `)
+  const testCommand = testCmdAnswer.trim() || defaultTestCmd
+
+  console.log('\n  Mode:')
+  console.log('  1) Solo - one agent, three phases (recommended)')
+  console.log('  2) Team - three agents rotating (zhuge/zhaoyun/guanyu)')
+  const modeAnswer = await rl.question('  Choice [1]: ')
+  const presetName = modeAnswer.trim() === '2' ? 'zhuge-team' : 'zhuge-solo'
+
+  rl.close()
+  return { presetName, testCommand }
+}
+
+async function commandQuickstart(configPath) {
+  const repoDir = process.cwd()
+  const resolved = path.resolve(repoDir, configPath)
+
+  const projectType = await detectProjectType(repoDir)
+  const testCommand = testCommandForProjectType(projectType)
+  console.log(`Detected project type: ${projectType} (test: ${testCommand})`)
+
+  const base = structuredClone(PRESETS['zhuge-solo'])
+  const patched = patchVerifyCommand(base, testCommand)
+  await fs.writeFile(resolved, `${JSON.stringify(patched, null, 2)}\n`, 'utf8')
+  console.log(`Created config at ${resolved}`)
+
+  const config = await loadConfig(resolved)
+  console.log('Running first turn...\n')
+  const result = await runLoop(config, { once: true })
+
+  if (result.exitCode === 0) {
+    console.log('\nFirst turn completed successfully!')
+    console.log('Next steps:')
+    console.log('  1. Edit commands in zhuge.config.json')
+    console.log('  2. Run continuously: zhuge-loop run')
+  } else {
+    console.log('\nFirst turn had issues. Check .zhuge-loop/logs/ for details.')
+    process.exitCode = result.exitCode
+  }
+}
+
+async function commandInit(configPath, force, presetName) {
+  const resolved = path.resolve(process.cwd(), configPath)
+
+  if (!force) {
+    try {
+      await fs.access(resolved)
+      throw new Error(`Config already exists: ${resolved}. Use --force to overwrite.`)
+    } catch (error) {
+      if (error?.code && error.code !== 'ENOENT') {
+        throw error
+      }
+    }
+  }
+
+  if (presetName) {
+    await writeSampleConfig(resolved, presetName)
+  } else if (process.stdin.isTTY) {
+    const wizard = await runInitWizard(process.cwd())
+    const base = structuredClone(PRESETS[wizard.presetName])
+    const patched = patchVerifyCommand(base, wizard.testCommand)
+    await fs.writeFile(resolved, `${JSON.stringify(patched, null, 2)}\n`, 'utf8')
+  } else {
+    await writeSampleConfig(resolved)
+  }
+
+  console.log(`Created config at ${resolved}`)
+  console.log('Next: edit commands, then run `zhuge-loop run --once`.')
+}
+
+async function commandRun(configPath, once) {
+  const resolved = path.resolve(process.cwd(), configPath)
+  const config = await loadConfig(resolved)
+  const result = await runLoop(config, { once })
+  process.exitCode = result.exitCode
+}
+
+async function runDoctor(config, strict) {
   const checks = []
+
+  if (strict) {
+    try {
+      await fs.access(config.repoDir, fsConstants.W_OK)
+      checks.push({ label: 'repoDir writable', status: 'OK', detail: config.repoDir })
+    } catch {
+      checks.push({ label: 'repoDir writable', status: 'FAIL', detail: config.repoDir })
+    }
+
+    try {
+      await mkdirp(config.runtimeDir)
+      checks.push({ label: 'runtimeDir writable', status: 'OK', detail: config.runtimeDir })
+    } catch {
+      checks.push({ label: 'runtimeDir writable', status: 'FAIL', detail: config.runtimeDir })
+    }
+
+    checks.push({ label: 'config valid', status: 'OK', detail: '' })
+
+    const gitResult = await runCommand('git status --porcelain', {
+      cwd: config.repoDir,
+      timeoutMs: 5000,
+    })
+    if (gitResult.code !== 0) {
+      checks.push({ label: 'git clean', status: 'WARN', detail: 'not a git repo' })
+    } else if (gitResult.out.trim()) {
+      checks.push({ label: 'git clean', status: 'WARN', detail: 'uncommitted changes' })
+    } else {
+      checks.push({ label: 'git clean', status: 'OK', detail: '' })
+    }
+  }
 
   for (const profileName of config.profileRotation) {
     const profile = config.profiles[profileName]
@@ -66,52 +226,27 @@ async function runDoctor(config) {
       })
 
       checks.push({
-        profile: profileName,
-        phase: phase.id,
-        command: token,
-        ok: probe.code === 0,
+        label: `${profileName}/${phase.id}`,
+        status: probe.code === 0 ? 'OK' : (strict ? 'FAIL' : 'MISSING'),
+        detail: token,
       })
     }
   }
 
   console.log('Doctor summary:')
-  console.log(`- repoDir: ${config.repoDir}`)
-  console.log(`- runtimeDir: ${config.runtimeDir}`)
-  console.log(`- profiles: ${config.profileRotation.join(', ')}`)
+  console.log(`  repoDir:    ${config.repoDir}`)
+  console.log(`  runtimeDir: ${config.runtimeDir}`)
+  console.log(`  profiles:   ${config.profileRotation.join(', ')}`)
+  console.log('')
 
   for (const item of checks) {
-    const status = item.ok ? 'OK' : 'MISSING'
-    console.log(`- [${status}] ${item.profile}/${item.phase}: ${item.command}`)
+    const detail = item.detail ? ` (${item.detail})` : ''
+    console.log(`  [${item.status}] ${item.label}${detail}`)
   }
 
-  if (checks.some((item) => !item.ok)) {
+  if (checks.some((c) => c.status === 'FAIL' || c.status === 'MISSING')) {
     process.exitCode = 2
   }
-}
-
-async function commandInit(configPath, force) {
-  const resolved = path.resolve(process.cwd(), configPath)
-  try {
-    if (!force) {
-      await fs.access(resolved)
-      throw new Error(`Config already exists: ${resolved}. Use --force to overwrite.`)
-    }
-  } catch (error) {
-    if (error?.code && error.code !== 'ENOENT') {
-      throw error
-    }
-  }
-
-  await writeSampleConfig(resolved)
-  console.log(`Created sample config at ${resolved}`)
-  console.log('Next step: edit commands, then run `zhuge-loop run --once`.')
-}
-
-async function commandRun(configPath, once) {
-  const resolved = path.resolve(process.cwd(), configPath)
-  const config = await loadConfig(resolved)
-  const result = await runLoop(config, { once })
-  process.exitCode = result.exitCode
 }
 
 async function main() {
@@ -124,8 +259,13 @@ async function main() {
     return
   }
 
+  if (command === 'quickstart') {
+    await commandQuickstart(configPath)
+    return
+  }
+
   if (command === 'init') {
-    await commandInit(configPath, Boolean(args.force))
+    await commandInit(configPath, Boolean(args.force), args.preset)
     return
   }
 
@@ -137,7 +277,7 @@ async function main() {
   if (command === 'doctor') {
     const resolved = path.resolve(process.cwd(), configPath)
     const config = await loadConfig(resolved)
-    await runDoctor(config)
+    await runDoctor(config, Boolean(args.strict))
     return
   }
 

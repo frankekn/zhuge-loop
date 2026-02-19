@@ -1,0 +1,66 @@
+# Handoff Note -- Turn {{ZHUGE_TURN}}
+
+> 此檔案用於 turn 之間的交接。每輪 agent 在結束前撰寫，下一輪 agent 在開始時讀取。
+> 欄位以 `{{...}}` 表示需替換的佔位符。
+
+---
+
+## 基本資訊
+
+- **Turn**: {{ZHUGE_TURN}}
+- **Profile**: {{ZHUGE_PROFILE}}
+- **Phase**: {{ZHUGE_PHASE}}
+- **Timestamp**: {{TIMESTAMP}}
+
+---
+
+## 本輪完成事項 / What Was Done This Turn
+
+<!-- 列出本輪實際完成的工作，每項一行。保持簡短具體。 -->
+
+- (填寫完成的工作項目)
+
+---
+
+## 下一輪待辦 / What To Do Next Turn
+
+<!-- 給下一位 agent 的明確指示。優先順序由上往下排列。 -->
+
+1. (最優先的待辦事項)
+2. (次要待辦)
+
+---
+
+## 阻塞與風險 / Blockers and Risks
+
+<!-- 列出目前已知的阻塞因素或潛在風險。如果沒有，寫 "None"。 -->
+
+- (阻塞或風險項目，或 "None")
+
+---
+
+## 變更檔案 / Files Changed
+
+<!-- 列出本輪新增、修改或刪除的檔案。格式：狀態 + 路徑。 -->
+
+```
+M  src/example.js        -- 修改原因簡述
+A  src/new-file.js       -- 新增原因簡述
+D  src/deprecated.js     -- 刪除原因簡述
+```
+
+---
+
+## 使用方式 / How This File Is Used
+
+此 handoff note 是 turn 之間的唯一交接媒介：
+
+1. **上一輪結束時**：當前 agent 將成果、待辦和風險寫入此檔案。
+2. **下一輪開始時**：新 agent 讀取前一輪的 handoff note，了解進度與上下文。
+3. **存放位置**：由 Zhuge Loop 自動歸檔至 `.zhuge-loop/logs/turn-NNNNNN-.../result.md`。
+
+關鍵原則：
+
+- 寫給下一位 agent 看，不是給自己看。假設讀者沒有本輪的執行記憶。
+- 保持簡短。只寫 actionable 的資訊，不要複製完整 log。
+- 阻塞和風險比完成事項更重要 -- 如果時間有限，優先寫清楚 blockers。

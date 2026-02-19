@@ -1,0 +1,85 @@
+# AGENTS.md -- Agent 角色定義
+
+> 此檔案定義專案中的 agent 角色、職責與工具分配。
+> Zhuge Loop 在每輪 turn 中，依據 `profileRotation` 輪替執行對應 profile。
+> 本檔案作為人類與 agent 的共同參考，確保每位 agent 清楚自己的邊界。
+
+---
+
+## Agent 列表
+
+| Agent | Role | Primary Tasks | Tools |
+|-------|------|---------------|-------|
+| zhuge (諸葛亮) | 協調者 / Coordinator | 拆解任務、決定優先順序、產出 plan | Claude Code, custom scripts |
+| zhaoyun (趙雲) | 實作者 / Implementer | 依照 plan 逐步交付程式碼 | Claude Code, IDE agents |
+| guanyu (關羽) | 審查者 / Reviewer | 程式碼審查、品質把關、提出改進建議 | Claude Code, linter, test runner |
+
+---
+
+## 如何自訂 / How to Customize
+
+### 新增 agent
+
+1. 在上方表格加一列，定義 Role 和 Primary Tasks。
+2. 在 `zhuge.config.json` 的 `profiles` 中新增對應 profile。
+3. 將新 profile 名稱加入 `profileRotation` 陣列。
+
+### 移除 agent
+
+1. 從表格刪除該列。
+2. 從 `zhuge.config.json` 移除對應 profile。
+3. 從 `profileRotation` 中移除。
+
+### 修改職責
+
+直接修改表格中的 Primary Tasks 欄位，並確保對應 profile 的 phases 命令與新職責一致。
+
+---
+
+## 輪替策略 / Rotation Strategy
+
+預設的 `zhuge-team` 使用線性輪替：
+
+```
+zhuge -> zhaoyun -> guanyu -> zhuge -> ...
+```
+
+常見的調整方式：
+
+### 2:1 實作與審查比例
+
+讓實作者 (zhaoyun) 連續跑兩輪，審查者 (guanyu) 跑一輪，減少 context switch：
+
+```json
+{
+  "profileRotation": ["zhuge", "zhaoyun", "zhaoyun", "guanyu"]
+}
+```
+
+### 純實作模式
+
+初期快速推進時，暫時跳過審查：
+
+```json
+{
+  "profileRotation": ["zhuge", "zhaoyun"]
+}
+```
+
+### 密集審查模式
+
+品質優先、交付壓力低時，每輪實作後立即審查：
+
+```json
+{
+  "profileRotation": ["zhuge", "zhaoyun", "guanyu", "zhaoyun", "guanyu"]
+}
+```
+
+---
+
+## 注意事項
+
+- 每位 agent 只應處理自己職責範圍內的工作。Implementer 不應自行決定跳過 plan。
+- Reviewer 發現的問題應記錄在 handoff note，由下一輪 Coordinator 決定修復優先順序。
+- 輪替策略應根據專案階段調整，沒有一個策略適用於所有時期。

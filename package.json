@@ -6,19 +6,39 @@
   "bin": {
     "zhuge-loop": "./src/cli.js"
   },
+  "files": [
+    "src/",
+    "schema/",
+    "starters/",
+    "examples/",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "loop": "node ./src/cli.js run",
-    "test": "node --test --test-concurrency=1 tests/*.test.js"
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "lint": "eslint src/ tests/",
+    "prepublishOnly": "npm run lint && npm test"
   },
   "keywords": [
     "autonomous",
     "agent-loop",
     "orchestrator",
     "devtools",
-    "zhuge"
+    "zhuge",
+    "three-kingdoms",
+    "cli"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frankekn/zhuge-loop.git"
+  },
+  "homepage": "https://github.com/frankekn/zhuge-loop#readme",
   "license": "MIT",
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "eslint": "^10.0.0"
   }
 }

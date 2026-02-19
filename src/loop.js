@@ -156,7 +156,12 @@ export async function runLoop(config, options = {}) {
       await cleanOldTurnLogs(config.logsDir, config.keepRecentTurns)
 
       if (!turnResult.ok && state.consecutiveFailures >= config.maxConsecutiveFailures) {
-        const line = `${nowIso()} HALT: consecutive failures reached ${state.consecutiveFailures}/${config.maxConsecutiveFailures}\n`
+        const recentErrors = state.results
+          .slice(-config.maxConsecutiveFailures)
+          .filter((r) => !r.ok)
+          .map((r) => `  turn ${r.turn}: ${r.errorSummary ?? 'unknown'}`)
+          .join('\n')
+        const line = `${nowIso()} HALT: consecutive failures reached ${state.consecutiveFailures}/${config.maxConsecutiveFailures}\nRecent failures:\n${recentErrors}\n`
         await appendText(config.haltLogPath, line)
         return { exitCode: 50, state }
       }

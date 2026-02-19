@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "zhuge-loop configuration",
+  "description": "Schema for zhuge-loop config files. Defines project settings, profile rotation, and phase execution pipelines.",
+  "type": "object",
+  "required": ["profileRotation", "profiles"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI for IDE autocompletion."
+    },
+    "name": {
+      "type": "string",
+      "description": "Project name."
+    },
+    "repoDir": {
+      "type": "string",
+      "default": ".",
+      "description": "Path to the repository root."
+    },
+    "runtimeDir": {
+      "type": "string",
+      "default": ".zhuge-loop",
+      "description": "Directory for runtime artifacts."
+    },
+    "statePath": {
+      "type": "string",
+      "default": ".zhuge-loop/state.json",
+      "description": "Path to the state file."
+    },
+    "logsDir": {
+      "type": "string",
+      "default": ".zhuge-loop/logs",
+      "description": "Directory for turn logs."
+    },
+    "haltLogPath": {
+      "type": "string",
+      "default": ".zhuge-loop/HALT.log",
+      "description": "Path to the halt log file."
+    },
+    "lockPath": {
+      "type": "string",
+      "default": ".zhuge-loop/zhuge-loop.lock",
+      "description": "Path to the lock file."
+    },
+    "sleepMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 120000,
+      "description": "Milliseconds to sleep between turns."
+    },
+    "maxConsecutiveFailures": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 3,
+      "description": "Number of consecutive failures before the fuse trips and the loop halts."
+    },
+    "keepRecentTurns": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 30,
+      "description": "Number of recent turn logs to retain."
+    },
+    "profileRotation": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "Ordered list of profile names to rotate through on each turn."
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Map of profile name to profile definition.",
+      "additionalProperties": {
+        "$ref": "#/definitions/profile"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "profile": {
+      "type": "object",
+      "required": ["phases"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of this profile."
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/phase"
+          },
+          "description": "Ordered list of phases to execute."
+        }
+      },
+      "additionalProperties": false
+    },
+    "phase": {
+      "type": "object",
+      "required": ["id", "command"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier for this phase."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command to execute for this phase."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 600000,
+          "description": "Maximum execution time in milliseconds before the phase is killed."
+        },
+        "allowFailure": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, a non-zero exit code does not abort the remaining phases."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm install
+      - run: npm run lint
+      - run: npm test
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Quickstart smoke test
+        run: |
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          echo '{}' > package.json
+          node "$GITHUB_WORKSPACE/src/cli.js" quickstart
+          test -f zhuge.config.json
+          test -f .zhuge-loop/state.json
+          node "$GITHUB_WORKSPACE/src/cli.js" doctor

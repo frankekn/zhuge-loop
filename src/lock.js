@@ -51,7 +51,8 @@ export async function acquireLock(lockPath) {
       const existing = await readExistingLock(lockPath)
       const existingPid = existing?.pid
       if (isProcessAlive(existingPid)) {
-        throw new Error(`LOCKED: ${lockPath} pid=${existingPid}`)
+        const since = existing?.startedAt ? ` since ${existing.startedAt}` : ''
+        throw new Error(`LOCKED: another instance is running (pid=${existingPid}${since}). Lock: ${lockPath}`)
       }
 
       await fs.unlink(lockPath).catch(() => {})
