@@ -1,13 +1,36 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { normalizeConfig, PRESETS, detectProjectType, patchVerifyCommand, writeSampleConfig } from '../src/config.js'
 import { runLoop } from '../src/loop.js'
 
+const CLI_PATH = path.resolve(process.cwd(), 'src/cli.js')
+
 async function makeTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), `zhuge-int-${prefix}-`))
+}
+
+async function runCli(args, cwd) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI_PATH, ...args], { cwd })
+    let out = ''
+    let err = ''
+
+    child.stdout.on('data', (chunk) => {
+      out += chunk.toString()
+    })
+
+    child.stderr.on('data', (chunk) => {
+      err += chunk.toString()
+    })
+
+    child.on('close', (code) => {
+      resolve({ code: code ?? 0, out, err })
+    })
+  })
 }
 
 // --- Preset validation ---
@@ -172,4 +195,46 @@ test('zhuge-team preset runs correct profile rotation', async () => {
   assert.equal(result.exitCode, 0)
   assert.equal(result.state.turn, 1)
   assert.equal(result.state.lastProfile, 'zhuge')
+})
+
+test('init refuses to overwrite existing config without --force', async () => {
+  const repoDir = await makeTempDir('init-overwrite')
+  const configPath = path.join(repoDir, 'zhuge.config.json')
+  await fs.writeFile(configPath, '{"name":"keep-me"}\n', 'utf8')
+
+  const result = await runCli(['init'], repoDir)
+  assert.equal(result.code, 1)
+  assert.match(result.err, /Config already exists/)
+
+  const raw = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.equal(raw.name, 'keep-me')
+})
+
+test('quickstart refuses to overwrite existing config without --force', async () => {
+  const repoDir = await makeTempDir('qs-overwrite')
+  const configPath = path.join(repoDir, 'zhuge.config.json')
+  await fs.writeFile(configPath, '{"name":"keep-me"}\n', 'utf8')
+  await fs.writeFile(path.join(repoDir, 'package.json'), '{"scripts":{"test":"echo ok"}}\n', 'utf8')
+
+  const result = await runCli(['quickstart'], repoDir)
+  assert.equal(result.code, 1)
+  assert.match(result.err, /Config already exists/)
+
+  const raw = JSON.parse(await fs.readFile(configPath, 'utf8'))
+  assert.equal(raw.name, 'keep-me')
+})
+
+test('quickstart exits non-zero when first turn fails verify phase', async () => {
+  const repoDir = await makeTempDir('qs-fail')
+  await fs.writeFile(path.join(repoDir, 'package.json'), '{}\n', 'utf8')
+
+  const result = await runCli(['quickstart'], repoDir)
+  assert.equal(result.code, 2)
+  assert.match(result.out, /First turn had issues/)
+
+  const logsDir = path.join(repoDir, '.zhuge-loop', 'logs')
+  const turnDirs = (await fs.readdir(logsDir)).filter((entry) => entry.startsWith('turn-'))
+  assert.equal(turnDirs.length, 1)
+  const turnResult = JSON.parse(await fs.readFile(path.join(logsDir, turnDirs[0], 'result.json'), 'utf8'))
+  assert.equal(turnResult.ok, false)
 })

@@ -20,7 +20,8 @@ function printHelp() {
 Zhuge Loop - agent loop runtime with Three Kingdoms methodology
 
 Usage:
-  zhuge-loop quickstart                     Detect, configure, and run first turn
+  zhuge-loop quickstart [--config <path>] [--force]
+                                            Detect, configure, and run first turn
   zhuge-loop init [--preset <name>]         Interactive setup or preset config
   zhuge-loop run [--config <path>] [--once]
   zhuge-loop doctor [--config <path>] [--strict]
@@ -83,6 +84,20 @@ function quoteForShell(input) {
   return `'${String(input).replace(/'/g, `'"'"'`)}'`
 }
 
+async function assertConfigCanBeCreated(configPath, force) {
+  if (force) return
+
+  try {
+    await fs.access(configPath)
+    throw new Error(`Config already exists: ${configPath}. Use --force to overwrite.`)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return
+    }
+    throw error
+  }
+}
+
 async function runInitWizard(repoDir) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   const detected = await detectProjectType(repoDir)
@@ -117,9 +132,10 @@ async function runInitWizard(repoDir) {
   return { presetName, testCommand }
 }
 
-async function commandQuickstart(configPath) {
+async function commandQuickstart(configPath, force) {
   const repoDir = process.cwd()
   const resolved = path.resolve(repoDir, configPath)
+  await assertConfigCanBeCreated(resolved, force)
 
   const projectType = await detectProjectType(repoDir)
   const testCommand = testCommandForProjectType(projectType)
@@ -134,30 +150,21 @@ async function commandQuickstart(configPath) {
   console.log('Running first turn...\n')
   const result = await runLoop(config, { once: true })
 
-  if (result.exitCode === 0) {
+  const latestTurn = result.state?.results?.[result.state.results.length - 1]
+  if (result.exitCode === 0 && latestTurn?.ok) {
     console.log('\nFirst turn completed successfully!')
     console.log('Next steps:')
     console.log('  1. Edit commands in zhuge.config.json')
     console.log('  2. Run continuously: zhuge-loop run')
   } else {
     console.log('\nFirst turn had issues. Check .zhuge-loop/logs/ for details.')
-    process.exitCode = result.exitCode
+    process.exitCode = result.exitCode || 2
   }
 }
 
 async function commandInit(configPath, force, presetName) {
   const resolved = path.resolve(process.cwd(), configPath)
-
-  if (!force) {
-    try {
-      await fs.access(resolved)
-      throw new Error(`Config already exists: ${resolved}. Use --force to overwrite.`)
-    } catch (error) {
-      if (error?.code && error.code !== 'ENOENT') {
-        throw error
-      }
-    }
-  }
+  await assertConfigCanBeCreated(resolved, force)
 
   if (presetName) {
     await writeSampleConfig(resolved, presetName)
@@ -260,7 +267,7 @@ async function main() {
   }
 
   if (command === 'quickstart') {
-    await commandQuickstart(configPath)
+    await commandQuickstart(configPath, Boolean(args.force))
     return
   }
 

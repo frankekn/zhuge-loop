@@ -46,6 +46,17 @@ test('runLoop --once completes one successful turn', async () => {
   assert.equal(result.state.results[0].ok, true)
 })
 
+test('runLoop --once returns non-zero when turn fails', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-once-fail-'))
+  const config = buildConfig(repoDir, `node -e "process.exit(7)"`)
+
+  const result = await runLoop(config, { once: true })
+  assert.equal(result.exitCode, 2)
+  assert.equal(result.state.turn, 1)
+  assert.equal(result.state.consecutiveFailures, 1)
+  assert.equal(result.state.results[0].ok, false)
+})
+
 test('runLoop halts when failure fuse is reached', async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-fail-'))
   const config = buildConfig(repoDir, `node -e "process.exit(1)"`, {

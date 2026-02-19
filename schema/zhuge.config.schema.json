@@ -3,7 +3,6 @@
   "title": "zhuge-loop configuration",
   "description": "Schema for zhuge-loop config files. Defines project settings, profile rotation, and phase execution pipelines.",
   "type": "object",
-  "required": ["profileRotation", "profiles"],
   "properties": {
     "$schema": {
       "type": "string",
@@ -77,7 +76,7 @@
       }
     }
   },
-  "additionalProperties": false,
+  "additionalProperties": true,
   "definitions": {
     "profile": {
       "type": "object",
@@ -96,7 +95,7 @@
           "description": "Ordered list of phases to execute."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "phase": {
       "type": "object",
@@ -124,7 +123,7 @@
           "description": "When true, a non-zero exit code does not abort the remaining phases."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     }
   }
 }

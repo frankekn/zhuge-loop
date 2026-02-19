@@ -166,7 +166,11 @@ export async function runLoop(config, options = {}) {
         return { exitCode: 50, state }
       }
 
-      if (once || stopRequested) {
+      if (once) {
+        return { exitCode: turnResult.ok ? 0 : 2, state }
+      }
+
+      if (stopRequested) {
         return { exitCode: 0, state }
       }
 

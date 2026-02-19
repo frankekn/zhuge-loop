@@ -33,8 +33,10 @@ jobs:
         run: |
           TMPDIR=$(mktemp -d)
           cd "$TMPDIR"
-          echo '{}' > package.json
+          echo '{"scripts":{"test":"echo ok"}}' > package.json
           node "$GITHUB_WORKSPACE/src/cli.js" quickstart
           test -f zhuge.config.json
           test -f .zhuge-loop/state.json
+          RESULT_JSON=$(find .zhuge-loop/logs -name result.json | head -n1)
+          node -e "const fs=require('node:fs');const p=process.argv[1];const r=JSON.parse(fs.readFileSync(p,'utf8'));if(!r.ok){process.exit(1)}" "$RESULT_JSON"
           node "$GITHUB_WORKSPACE/src/cli.js" doctor
