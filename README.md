@@ -226,3 +226,7 @@ A: 看 `.zhuge-loop/logs/turn-*/result.md`，裡面有 profile、各 phase 的 e
 ## License
 
 MIT
+
+## Contributors
+
+This project welcomes contributions. See issues for details.
