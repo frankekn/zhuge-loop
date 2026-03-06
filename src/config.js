@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { DEFAULT_CONTEXT_COMMANDS } from './context.js'
+import { DEFAULT_LINEAR_PROMPT_PHASE_IDS } from './linear.js'
 import { resolveFrom } from './utils.js'
 
 const DEFAULT_CONFIG = {
@@ -13,6 +15,34 @@ const DEFAULT_CONFIG = {
   sleepMs: 120_000,
   maxConsecutiveFailures: 3,
   keepRecentTurns: 30,
+  context: {
+    commands: DEFAULT_CONTEXT_COMMANDS,
+  },
+  repoPolicy: {
+    onDirty: 'warn',
+    pushBranch: null,
+    autoCommitAfterEachPhase: false,
+    autoPushAfterEachPhase: false,
+    forbidEmoji: false,
+    requireConventionalCommits: false,
+    commitMessageMaxLen: 96,
+    requireIssueKeyRegex: '',
+  },
+  integrations: {
+    linear: {
+      enabled: false,
+      cliPath: './tools/linear-cli.sh',
+      promptPhaseIds: DEFAULT_LINEAR_PROMPT_PHASE_IDS,
+      maxTasks: 10,
+      contextMaxChars: 4_000,
+    },
+  },
+  kiro: {
+    acpCommand: 'kiro-acp',
+    cliCommand: 'kiro-cli-chat',
+    trustAllTools: true,
+    fallbackToCli: true,
+  },
   profileRotation: ['default'],
   profiles: {
     default: {
@@ -20,7 +50,10 @@ const DEFAULT_CONFIG = {
       phases: [
         {
           id: 'heartbeat',
-          command: 'echo "replace this command in zhuge.config.json"',
+          run: {
+            kind: 'shell',
+            command: 'echo "replace this command in zhuge.config.json"',
+          },
           timeoutMs: 600_000,
           allowFailure: false,
         },
@@ -29,150 +62,227 @@ const DEFAULT_CONFIG = {
   },
 }
 
-function buildSoloPreset(name, verifyCommand, implementCommand) {
-  return {
-    name,
-    sleepMs: 120_000,
-    maxConsecutiveFailures: 3,
-    keepRecentTurns: 30,
-    profileRotation: ['default'],
-    profiles: {
-      default: {
-        description: 'Plan -> implement -> verify in small slices',
-        phases: [
-          { id: 'plan', command: 'echo "[plan] choose the smallest shippable slice"', timeoutMs: 600_000, allowFailure: false },
-          { id: 'implement', command: implementCommand ?? 'echo "[implement] run your agent or script here"', timeoutMs: 1_200_000, allowFailure: false },
-          { id: 'verify', command: verifyCommand, timeoutMs: 900_000, allowFailure: false },
-        ],
-      },
-    },
-  }
-}
-
-export const PRESETS = Object.freeze({
-  'zhuge-solo': buildSoloPreset('zhuge-solo', 'npm test'),
-  'zhuge-team': {
-    name: 'zhuge-team',
-    sleepMs: 120_000,
-    maxConsecutiveFailures: 3,
-    keepRecentTurns: 30,
-    profileRotation: ['zhuge', 'zhaoyun', 'guanyu'],
-    profiles: {
-      zhuge: {
-        description: '\u8AF8\u845B\u4EAE (\u5354\u8ABF)\uFF1A\u62C6\u4EFB\u52D9\u3001\u5B9A\u65B9\u5411',
-        phases: [
-          { id: 'plan', command: 'echo "[zhuge] break the task into small slices"', timeoutMs: 600_000, allowFailure: false },
-        ],
-      },
-      zhaoyun: {
-        description: '\u8D99\u96F2 (\u5BE6\u4F5C)\uFF1A\u53EF\u9760\u4EA4\u4ED8\u6BCF\u4E00\u884C',
-        phases: [
-          { id: 'implement', command: 'echo "[zhaoyun] implement the next slice"', timeoutMs: 1_200_000, allowFailure: false },
-          { id: 'verify', command: 'npm test', timeoutMs: 900_000, allowFailure: false },
-        ],
-      },
-      guanyu: {
-        description: '\u95DC\u7FBD (\u5BE9\u67E5)\uFF1A\u54C1\u8CEA\u4E0D\u59A5\u5354',
-        phases: [
-          { id: 'review', command: 'echo "[guanyu] review recent changes"', timeoutMs: 600_000, allowFailure: false },
-        ],
-      },
-    },
-  },
-  'node-lib': buildSoloPreset('node-lib', 'npm test'),
-  'react-vite': buildSoloPreset('react-vite', 'npx vitest run'),
-  'python': buildSoloPreset('python', 'pytest'),
-  'generic': buildSoloPreset('generic', 'echo ok'),
-  'claude-code': buildSoloPreset('claude-code', 'npm test', 'claude --dangerously-skip-permissions -p "implement the next task"'),
-  'kiro': buildSoloPreset('kiro', 'npm test', 'kiro task run'),
-})
-
-const TEST_COMMANDS = {
-  'node-lib': 'npm test',
-  'react-vite': 'npx vitest run',
-  'python': 'pytest',
-  'generic': 'echo ok',
-}
-
-export function testCommandForProjectType(projectType) {
-  return TEST_COMMANDS[projectType] ?? 'echo ok'
-}
-
-export async function detectProjectType(repoDir) {
-  const exists = async (name) => {
-    try {
-      await fs.access(path.join(repoDir, name))
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  if (await exists('vite.config.ts') || await exists('vite.config.js') || await exists('vite.config.mjs')) {
-    return 'react-vite'
-  }
-  if (await exists('package.json')) {
-    return 'node-lib'
-  }
-  if (await exists('pyproject.toml') || await exists('requirements.txt')) {
-    return 'python'
-  }
-  return 'generic'
-}
-
-export function patchVerifyCommand(config, testCommand) {
-  const patched = structuredClone(config)
-  for (const profile of Object.values(patched.profiles)) {
-    for (const phase of profile.phases) {
-      if (phase.id === 'verify') {
-        phase.command = testCommand
-      }
-    }
-  }
-  return patched
-}
-
 function assertPositiveInteger(value, name) {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer, got ${JSON.stringify(value)}. Check your zhuge.config.json.`)
+    throw new Error(`${name} must be a positive integer`)
   }
 }
 
 function assertNonEmptyString(value, name) {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`${name} must be a non-empty string, got ${JSON.stringify(value)}. Check your zhuge.config.json.`)
+    throw new Error(`${name} must be a non-empty string`)
   }
 }
 
-function validatePhases(profileName, phases) {
-  if (!Array.isArray(phases) || phases.length === 0) {
-    throw new Error(`profiles.${profileName}.phases must be a non-empty array. Each profile needs at least one phase with {id, command}.`)
+function assertBoolean(value, name) {
+  if (typeof value !== 'boolean') {
+    throw new Error(`${name} must be boolean`)
   }
-  for (const phase of phases) {
-    assertNonEmptyString(phase.id, `profiles.${profileName}.phases[].id`)
-    assertNonEmptyString(phase.command, `profiles.${profileName}.phases[].command`)
-    const timeoutMs = phase.timeoutMs ?? 600_000
-    assertPositiveInteger(timeoutMs, `profiles.${profileName}.phases[${phase.id}].timeoutMs`)
-    if (phase.allowFailure !== null && phase.allowFailure !== undefined && typeof phase.allowFailure !== 'boolean') {
-      throw new Error(`profiles.${profileName}.phases[${phase.id}].allowFailure must be boolean`)
+}
+
+function normalizeContext(context) {
+  if (context == null) {
+    return {
+      commands: DEFAULT_CONTEXT_COMMANDS.map((command) => ({ ...command })),
     }
   }
+
+  if (typeof context !== 'object' || Array.isArray(context)) {
+    throw new Error('context must be an object')
+  }
+
+  const commands = context.commands ?? DEFAULT_CONTEXT_COMMANDS
+  if (!Array.isArray(commands)) {
+    throw new Error('context.commands must be an array')
+  }
+
+  return {
+    commands: commands.map((command, index) => {
+      const commandPath = `context.commands[${index}]`
+      assertNonEmptyString(command?.name, `${commandPath}.name`)
+      assertNonEmptyString(command?.command, `${commandPath}.command`)
+
+      const timeoutMs = command.timeoutMs ?? 5_000
+      const maxLines = command.maxLines ?? 50
+      assertPositiveInteger(timeoutMs, `${commandPath}.timeoutMs`)
+      assertPositiveInteger(maxLines, `${commandPath}.maxLines`)
+
+      return {
+        name: command.name.trim(),
+        command: command.command.trim(),
+        timeoutMs,
+        maxLines,
+      }
+    }),
+  }
+}
+
+function normalizeRepoPolicy(repoPolicy) {
+  const merged = {
+    ...DEFAULT_CONFIG.repoPolicy,
+    ...(repoPolicy ?? {}),
+  }
+
+  if (!['warn', 'auto-stash'].includes(merged.onDirty)) {
+    throw new Error('repoPolicy.onDirty must be "warn" or "auto-stash"')
+  }
+
+  if (merged.pushBranch != null) {
+    assertNonEmptyString(merged.pushBranch, 'repoPolicy.pushBranch')
+  }
+
+  assertBoolean(merged.autoCommitAfterEachPhase, 'repoPolicy.autoCommitAfterEachPhase')
+  assertBoolean(merged.autoPushAfterEachPhase, 'repoPolicy.autoPushAfterEachPhase')
+  assertBoolean(merged.forbidEmoji, 'repoPolicy.forbidEmoji')
+  assertBoolean(merged.requireConventionalCommits, 'repoPolicy.requireConventionalCommits')
+  assertPositiveInteger(Number(merged.commitMessageMaxLen), 'repoPolicy.commitMessageMaxLen')
+  if (merged.requireIssueKeyRegex != null && String(merged.requireIssueKeyRegex).length > 0) {
+    assertNonEmptyString(merged.requireIssueKeyRegex, 'repoPolicy.requireIssueKeyRegex')
+  }
+
+  return {
+    onDirty: merged.onDirty,
+    pushBranch: merged.pushBranch == null ? null : String(merged.pushBranch).trim(),
+    autoCommitAfterEachPhase: Boolean(merged.autoCommitAfterEachPhase),
+    autoPushAfterEachPhase: Boolean(merged.autoPushAfterEachPhase),
+    forbidEmoji: Boolean(merged.forbidEmoji),
+    requireConventionalCommits: Boolean(merged.requireConventionalCommits),
+    commitMessageMaxLen: Number(merged.commitMessageMaxLen),
+    requireIssueKeyRegex: String(merged.requireIssueKeyRegex ?? '').trim(),
+  }
+}
+
+function normalizeLinearIntegration(linear, repoDir) {
+  const merged = {
+    ...DEFAULT_CONFIG.integrations.linear,
+    ...(linear ?? {}),
+  }
+
+  assertBoolean(merged.enabled, 'integrations.linear.enabled')
+  assertNonEmptyString(merged.cliPath, 'integrations.linear.cliPath')
+  assertPositiveInteger(Number(merged.maxTasks), 'integrations.linear.maxTasks')
+  assertPositiveInteger(Number(merged.contextMaxChars), 'integrations.linear.contextMaxChars')
+
+  if (!Array.isArray(merged.promptPhaseIds)) {
+    throw new Error('integrations.linear.promptPhaseIds must be an array')
+  }
+
+  const promptPhaseIds = merged.promptPhaseIds.map((phaseId, index) => {
+    assertNonEmptyString(phaseId, `integrations.linear.promptPhaseIds[${index}]`)
+    return String(phaseId).trim()
+  })
+
+  return {
+    enabled: Boolean(merged.enabled),
+    cliPath: resolveFrom(repoDir, merged.cliPath),
+    promptPhaseIds,
+    maxTasks: Number(merged.maxTasks),
+    contextMaxChars: Number(merged.contextMaxChars),
+  }
+}
+
+function normalizePhase(profileName, phase, index) {
+  const phasePath = `profiles.${profileName}.phases[${index}]`
+  assertNonEmptyString(phase?.id, `${phasePath}.id`)
+
+  const timeoutMs = phase.timeoutMs ?? 600_000
+  assertPositiveInteger(timeoutMs, `${phasePath}.timeoutMs`)
+
+  if (phase.allowFailure != null && typeof phase.allowFailure !== 'boolean') {
+    throw new Error(`${phasePath}.allowFailure must be boolean`)
+  }
+
+  const hasLegacyCommand =
+    Object.prototype.hasOwnProperty.call(phase, 'command') && phase.command != null
+  const hasRun = Object.prototype.hasOwnProperty.call(phase, 'run') && phase.run != null
+
+  if (hasLegacyCommand && hasRun) {
+    throw new Error(`${phasePath} cannot specify both command and run`)
+  }
+
+  let run = null
+  if (hasRun) {
+    if (!phase.run || typeof phase.run !== 'object' || Array.isArray(phase.run)) {
+      throw new Error(`${phasePath}.run must be an object`)
+    }
+
+    const kind = String(phase.run.kind ?? '').trim()
+    if (kind === 'shell') {
+      assertNonEmptyString(phase.run.command, `${phasePath}.run.command`)
+      run = {
+        kind: 'shell',
+        command: phase.run.command.trim(),
+      }
+    } else if (kind === 'kiro') {
+      assertNonEmptyString(phase.run.agent, `${phasePath}.run.agent`)
+      assertNonEmptyString(phase.run.prompt, `${phasePath}.run.prompt`)
+      run = {
+        kind: 'kiro',
+        agent: phase.run.agent.trim(),
+        prompt: phase.run.prompt,
+      }
+    } else {
+      throw new Error(`${phasePath}.run.kind must be "shell" or "kiro"`)
+    }
+  } else {
+    assertNonEmptyString(phase.command, `${phasePath}.command`)
+    run = {
+      kind: 'shell',
+      command: phase.command.trim(),
+    }
+  }
+
+  return {
+    id: phase.id.trim(),
+    timeoutMs,
+    allowFailure: Boolean(phase.allowFailure),
+    run,
+  }
+}
+
+function normalizeProfiles(profiles) {
+  const normalizedProfiles = {}
+
+  for (const [profileName, profile] of Object.entries(profiles)) {
+    if (!Array.isArray(profile?.phases) || profile.phases.length === 0) {
+      throw new Error(`profiles.${profileName}.phases must be a non-empty array`)
+    }
+
+    normalizedProfiles[profileName] = {
+      ...profile,
+      phases: profile.phases.map((phase, index) => normalizePhase(profileName, phase, index)),
+    }
+  }
+
+  return normalizedProfiles
 }
 
 export function normalizeConfig(raw, configPath = path.resolve(process.cwd(), 'zhuge.config.json')) {
   const merged = {
     ...DEFAULT_CONFIG,
     ...raw,
+    context: normalizeContext(raw?.context ?? DEFAULT_CONFIG.context),
+    repoPolicy: normalizeRepoPolicy(raw?.repoPolicy ?? DEFAULT_CONFIG.repoPolicy),
+    kiro: {
+      ...DEFAULT_CONFIG.kiro,
+      ...(raw?.kiro ?? {}),
+    },
     profiles: raw?.profiles ?? DEFAULT_CONFIG.profiles,
     profileRotation: raw?.profileRotation ?? DEFAULT_CONFIG.profileRotation,
   }
 
   const configDir = path.dirname(configPath)
   const repoDir = resolveFrom(configDir, merged.repoDir)
+  const profiles = normalizeProfiles(merged.profiles)
+  const integrations = {
+    linear: normalizeLinearIntegration(raw?.integrations?.linear ?? DEFAULT_CONFIG.integrations.linear, repoDir),
+  }
 
   const normalized = {
     ...merged,
     repoDir,
+    profiles,
+    integrations,
     runtimeDir: resolveFrom(repoDir, merged.runtimeDir),
     statePath: resolveFrom(repoDir, merged.statePath),
     logsDir: resolveFrom(repoDir, merged.logsDir),
@@ -192,14 +302,15 @@ export function normalizeConfig(raw, configPath = path.resolve(process.cwd(), 'z
     throw new Error('profiles must be an object')
   }
 
+  assertNonEmptyString(normalized.kiro.acpCommand, 'kiro.acpCommand')
+  assertNonEmptyString(normalized.kiro.cliCommand, 'kiro.cliCommand')
+  assertBoolean(normalized.kiro.trustAllTools, 'kiro.trustAllTools')
+  assertBoolean(normalized.kiro.fallbackToCli, 'kiro.fallbackToCli')
+
   for (const profileName of normalized.profileRotation) {
     if (!normalized.profiles[profileName]) {
       throw new Error(`profileRotation references missing profile: ${profileName}`)
     }
-  }
-
-  for (const [profileName, profile] of Object.entries(normalized.profiles)) {
-    validatePhases(profileName, profile.phases)
   }
 
   return normalized
@@ -210,15 +321,44 @@ export async function loadConfig(configPath = path.resolve(process.cwd(), 'zhuge
   return normalizeConfig(raw, configPath)
 }
 
-export async function writeSampleConfig(configPath, presetName) {
-  const preset = presetName ? PRESETS[presetName] : null
-  if (presetName && !preset) {
-    throw new Error(`Unknown preset: ${presetName}. Available: ${Object.keys(PRESETS).join(', ')}`)
+export async function writeSampleConfig(configPath = path.resolve(process.cwd(), 'zhuge.config.json')) {
+  const sample = {
+    ...DEFAULT_CONFIG,
+    profiles: {
+      default: {
+        description: 'Plan -> implement -> verify in small slices',
+        phases: [
+          {
+            id: 'plan',
+            run: {
+              kind: 'shell',
+              command: 'echo "[plan] choose the smallest shippable slice"',
+            },
+            timeoutMs: 600000,
+            allowFailure: false,
+          },
+          {
+            id: 'implement',
+            run: {
+              kind: 'shell',
+              command: 'echo "[implement] run your agent or script here"',
+            },
+            timeoutMs: 1200000,
+            allowFailure: false,
+          },
+          {
+            id: 'verify',
+            run: {
+              kind: 'shell',
+              command: 'npm test',
+            },
+            timeoutMs: 900000,
+            allowFailure: false,
+          },
+        ],
+      },
+    },
   }
-
-  const sample = preset
-    ? structuredClone(preset)
-    : buildSoloPreset('zhuge-loop', 'npm test')
 
   await fs.writeFile(configPath, `${JSON.stringify(sample, null, 2)}\n`, 'utf8')
 }

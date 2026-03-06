@@ -190,6 +190,26 @@ async function commandRun(configPath, once) {
 
 async function runDoctor(config, strict) {
   const checks = []
+  const hasKiroPhase = config.profileRotation.some((profileName) =>
+    config.profiles[profileName].phases.some((phase) => phase.run.kind === 'kiro')
+  )
+
+  for (const command of config.context?.commands ?? []) {
+    const token = firstCommandToken(command.command)
+    if (!token) continue
+
+    const probe = await runCommand(`command -v ${quoteForShell(token)}`, {
+      cwd: config.repoDir,
+      timeoutMs: 3000,
+    })
+
+    checks.push({
+      profile: 'context',
+      phase: command.name,
+      command: token,
+      ok: probe.code === 0,
+    })
+  }
 
   if (strict) {
     try {
@@ -224,7 +244,9 @@ async function runDoctor(config, strict) {
   for (const profileName of config.profileRotation) {
     const profile = config.profiles[profileName]
     for (const phase of profile.phases) {
-      const token = firstCommandToken(phase.command)
+      if (phase.run.kind !== 'shell') continue
+
+      const token = firstCommandToken(phase.run.command)
       if (!token) continue
 
       const probe = await runCommand(`command -v ${quoteForShell(token)}`, {
@@ -238,6 +260,55 @@ async function runDoctor(config, strict) {
         detail: token,
       })
     }
+  }
+
+  if (hasKiroPhase) {
+    for (const [name, command] of [
+      ['kiro.acpCommand', config.kiro.acpCommand],
+      ['kiro.cliCommand', config.kiro.cliCommand],
+    ]) {
+      const token = firstCommandToken(command)
+      const probe = await runCommand(`command -v ${quoteForShell(token)}`, {
+        cwd: config.repoDir,
+        timeoutMs: 3000,
+      })
+
+      checks.push({
+        profile: 'kiro',
+        phase: name,
+        command: token,
+        ok: probe.code === 0,
+      })
+    }
+  }
+
+  if (config.integrations?.linear?.enabled) {
+    const token = firstCommandToken(config.integrations.linear.cliPath)
+    const probe = await runCommand(`command -v ${quoteForShell(token)}`, {
+      cwd: config.repoDir,
+      timeoutMs: 3000,
+    })
+
+    checks.push({
+      profile: 'linear',
+      phase: 'cli',
+      command: token,
+      ok: probe.code === 0,
+    })
+  }
+
+  if (config.repoPolicy?.pushBranch) {
+    const probe = await runCommand(`command -v ${quoteForShell('git')}`, {
+      cwd: config.repoDir,
+      timeoutMs: 3000,
+    })
+
+    checks.push({
+      profile: 'repo',
+      phase: 'git',
+      command: 'git',
+      ok: probe.code === 0,
+    })
   }
 
   console.log('Doctor summary:')

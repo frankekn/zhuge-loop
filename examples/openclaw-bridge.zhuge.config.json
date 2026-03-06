@@ -11,19 +11,28 @@
       "phases": [
         {
           "id": "coordinator",
-          "command": "openclaw run --agent zhuge --mode coordinator",
+          "run": {
+            "kind": "shell",
+            "command": "openclaw run --agent zhuge --mode coordinator"
+          },
           "timeoutMs": 600000,
           "allowFailure": false
         },
         {
           "id": "executor",
-          "command": "openclaw run --agent zhaoyun --mode executor",
+          "run": {
+            "kind": "shell",
+            "command": "openclaw run --agent zhaoyun --mode executor"
+          },
           "timeoutMs": 1200000,
           "allowFailure": false
         },
         {
           "id": "verify",
-          "command": "npm test",
+          "run": {
+            "kind": "shell",
+            "command": "npm test"
+          },
           "timeoutMs": 900000,
           "allowFailure": false
         }
@@ -34,19 +43,28 @@
       "phases": [
         {
           "id": "director",
-          "command": "openclaw run --agent guanyu --mode director",
+          "run": {
+            "kind": "shell",
+            "command": "openclaw run --agent guanyu --mode director"
+          },
           "timeoutMs": 600000,
           "allowFailure": false
         },
         {
           "id": "executor",
-          "command": "openclaw run --agent zhangfei --mode executor",
+          "run": {
+            "kind": "shell",
+            "command": "openclaw run --agent zhangfei --mode executor"
+          },
           "timeoutMs": 1200000,
           "allowFailure": false
         },
         {
           "id": "verify",
-          "command": "npm test",
+          "run": {
+            "kind": "shell",
+            "command": "npm test"
+          },
           "timeoutMs": 900000,
           "allowFailure": false
         }

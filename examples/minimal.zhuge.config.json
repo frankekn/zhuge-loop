@@ -11,13 +11,19 @@
       "phases": [
         {
           "id": "plan",
-          "command": "echo '[plan] choose the smallest slice'",
+          "run": {
+            "kind": "shell",
+            "command": "echo '[plan] choose the smallest slice'"
+          },
           "timeoutMs": 600000,
           "allowFailure": false
         },
         {
           "id": "verify",
-          "command": "node -e \"console.log('ok')\"",
+          "run": {
+            "kind": "shell",
+            "command": "node -e \"console.log('ok')\""
+          },
           "timeoutMs": 600000,
           "allowFailure": false
         }

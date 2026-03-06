@@ -1,232 +1,233 @@
 # Zhuge Loop
 
-有武將工作法的 agent loop runtime。
+Always-on autonomous development loop designed for long-running execution.
 
-`zhuge-loop` 做一件事：以 turn 為單位，反覆執行你指定的 shell 命令，搭配單實例鎖、失敗熔斷、完整日誌，讓自動化迴圈可以跑 24 小時以上而不失控。
+`zhuge-loop` focuses on one thing: keep shipping small, verifiable slices in repeated turns, with lock safety, failure fuse, and auditable logs.
 
----
+## Why this exists
 
-## 10 分鐘跑起來
+Many loop tools optimize for flashy demos but become hard to trust during 24h+ operation.
+Zhuge Loop is built for operational stability:
+
+- Single-instance lock with stale-lock recovery.
+- Turn-based orchestration with profile rotation.
+- Consecutive failure fuse (`maxConsecutiveFailures`) to prevent infinite broken loops.
+- Full per-turn logs for postmortem and replay.
+
+## 60-second quick start
+
+1. Install dependencies (none required beyond Node >= 20):
 
 ```bash
-npx zhuge-loop quickstart
+npm install
 ```
 
-這一條命令做三件事：
-1. 偵測你的專案類型（Node.js / Python / Vite / 通用）
-2. 產出 `zhuge.config.json`
-3. 跑第一輪 turn 驗證可行性
+2. Generate a config:
 
-跑完後看終端輸出。成功的話，接下來改 config 就好。
+```bash
+node src/cli.js init
+```
 
----
+3. Edit `zhuge.config.json` phases for your own workflow.
 
-## 換成你的命令
+4. Run one turn to validate:
 
-打開 `zhuge.config.json`，找到 `profiles → default → phases`，把 `command` 換成你自己的指令：
+```bash
+node src/cli.js run --once
+```
+
+5. Run continuously:
+
+```bash
+node src/cli.js run
+```
+
+## Core concepts
+
+- Turn: one full execution cycle.
+- Profile: a named workflow with ordered phases.
+- Phase: one runnable step with timeout and failure policy.
+- Runner: how a phase executes. Built-in runners are `shell` and `kiro`.
+- Rotation: which profile runs for each turn.
+
+You can model playability/maintainability/strategy as three profiles and rotate by turn.
+
+## Config example
 
 ```json
 {
-  "profiles": {
-    "default": {
-      "phases": [
-        { "id": "plan",      "command": "你的規劃指令",   "timeoutMs": 600000,  "allowFailure": false },
-        { "id": "implement", "command": "你的實作指令",   "timeoutMs": 1200000, "allowFailure": false },
-        { "id": "verify",    "command": "npm test",       "timeoutMs": 900000,  "allowFailure": false }
-      ]
-    }
-  }
-}
-```
-
-跑一輪確認沒問題：
-
-```bash
-npx zhuge-loop run --once
-```
-
-持續運行：
-
-```bash
-npx zhuge-loop run
-```
-
----
-
-## 武將是誰
-
-| 武將 | 職責 | 一句話 |
-|------|------|--------|
-| zhuge 諸葛亮 | 協調 | 拆任務、定方向 |
-| zhaoyun 趙雲 | 實作 | 可靠交付每一行 |
-| guanyu 關羽 | 審查 | 品質不妥協 |
-
-在 `zhuge-team` preset 裡，三位武將對應三個 profile，以 turn 為單位輪替執行。每個 profile 有各自的 phases（shell 命令）。
-
----
-
-## 進階：多將協作
-
-```bash
-npx zhuge-loop init --preset zhuge-team
-```
-
-產出的 config 會包含三個 profile（zhuge / zhaoyun / guanyu），`profileRotation` 按順序輪替。你只需要把每個 profile 裡的 `command` 換成實際的 agent 或腳本指令。
-
----
-
-## 最小 config 範例
-
-一個最簡單的 solo 設定：
-
-```json
-{
-  "name": "my-project",
+  "name": "my-product-loop",
+  "repoDir": ".",
   "sleepMs": 120000,
   "maxConsecutiveFailures": 3,
-  "keepRecentTurns": 30,
-  "profileRotation": ["default"],
+  "context": {
+    "commands": [
+      {
+        "name": "git-status",
+        "command": "git status --porcelain",
+        "timeoutMs": 5000,
+        "maxLines": 50
+      },
+      {
+        "name": "git-log",
+        "command": "git log -10 --oneline",
+        "timeoutMs": 5000,
+        "maxLines": 50
+      }
+    ]
+  },
+  "repoPolicy": {
+    "pushBranch": "agent-dev",
+    "onDirty": "auto-stash",
+    "autoCommitAfterEachPhase": true,
+    "autoPushAfterEachPhase": true,
+    "requireConventionalCommits": true,
+    "commitMessageMaxLen": 100,
+    "requireIssueKeyRegex": "AIR-\\d+"
+  },
+  "integrations": {
+    "linear": {
+      "enabled": true,
+      "cliPath": "./tools/linear-cli.sh",
+      "promptPhaseIds": ["strategist"],
+      "maxTasks": 10,
+      "contextMaxChars": 4000
+    }
+  },
+  "kiro": {
+    "acpCommand": "kiro-acp",
+    "cliCommand": "kiro-cli-chat",
+    "trustAllTools": true,
+    "fallbackToCli": true
+  },
+  "profileRotation": ["playability", "maintainability"],
   "profiles": {
-    "default": {
-      "description": "Plan -> implement -> verify",
+    "playability": {
+      "description": "Ship user-visible slices",
       "phases": [
-        { "id": "plan",      "command": "echo '[plan] pick the smallest slice'", "timeoutMs": 600000,  "allowFailure": false },
-        { "id": "implement", "command": "echo '[impl] run your agent here'",     "timeoutMs": 1200000, "allowFailure": false },
-        { "id": "verify",    "command": "npm test",                               "timeoutMs": 900000,  "allowFailure": false }
+        {
+          "id": "implement",
+          "run": {
+            "kind": "kiro",
+            "agent": "zhuge",
+            "prompt": "Implement the highest-value playability slice."
+          },
+          "timeoutMs": 1200000,
+          "allowFailure": false
+        },
+        {
+          "id": "verify",
+          "run": {
+            "kind": "shell",
+            "command": "npm test"
+          },
+          "timeoutMs": 900000,
+          "allowFailure": false
+        }
+      ]
+    },
+    "maintainability": {
+      "description": "Refactor and harden",
+      "phases": [
+        {
+          "id": "refactor",
+          "run": {
+            "kind": "shell",
+            "command": "codex run --profile maintainability"
+          },
+          "timeoutMs": 1200000,
+          "allowFailure": false
+        }
       ]
     }
   }
 }
 ```
 
----
+## Log and state layout
 
-## Core Concepts
+By default, runtime artifacts are under `.zhuge-loop/`:
 
-- **Turn**：一個完整的執行週期。每個 turn 執行一個 profile 的所有 phases。
-- **Profile**：具名的工作流程，包含有序的 phases。
-- **Phase**：一條 shell 命令，搭配 timeout 和失敗策略（`allowFailure`）。
-- **Rotation**：決定每個 turn 跑哪個 profile。`profileRotation` 陣列依序輪替。
+- `.zhuge-loop/state.json`: turn counter and recent results.
+- `.zhuge-loop/logs/turn-*/repo-context.txt`: repo snapshot collected once at turn start.
+- `.zhuge-loop/logs/turn-*/linear-context.txt`: active Linear task snapshot collected once per turn.
+- `.zhuge-loop/logs/turn-*/NN-<phase>.handoff.txt`: input handoff passed into that phase.
+- `.zhuge-loop/logs/turn-*/NN-<phase>.prompt.txt`: composed Kiro prompt for Kiro phases.
+- `.zhuge-loop/logs/turn-*/`: per-turn context, stdout/stderr, and result summary.
+- `.zhuge-loop/logs/turn-*/NN-<phase>.meta.json`: Kiro metadata for Kiro phases.
+- `.zhuge-loop/HALT.log`: records failure-fuse halts.
 
----
+## Standalone first
 
-## 運行穩定性
+Zhuge Loop runs without OpenClaw or any specific agent framework.
+The runtime only needs runnable phases in your profiles.
 
-Zhuge Loop 為長時間無人值守運行而設計：
+If your commands can run in terminal, they can run in Zhuge Loop.
+If you use Kiro, phases can run through ACP first and fall back to `kiro-cli-chat`.
+Kiro phases automatically receive repo context and the previous phase handoff in their composed prompt.
+Shell phases receive the same inputs via `ZHUGE_REPO_CONTEXT`, `ZHUGE_REPO_CONTEXT_PATH`, `ZHUGE_HANDOFF`, and `ZHUGE_HANDOFF_PATH`.
+If `integrations.linear.enabled=true`, the runtime can query active Linear tasks, inject them into selected Kiro phases, and process `[LINEAR_NEW_TASK]`, `[LINEAR_ACTIVE]`, and `[LINEAR_DONE]` markers from phase output.
+If `repoPolicy.autoCommitAfterEachPhase=true`, the runtime can auto-commit changed files after a successful phase; with `autoPushAfterEachPhase=true`, it also pushes the delivery branch automatically.
 
-- **單實例鎖**：同一個 `.zhuge-loop/zhuge-loop.lock` 只允許一個 process。如果前一個 process 已死亡，自動清理 stale lock。
-- **失敗熔斷**：連續失敗次數達到 `maxConsecutiveFailures` 時自動停機，避免錯誤無限循環。停機原因記錄在 `.zhuge-loop/HALT.log`。
-- **Turn 日誌**：每輪的 context、stdout、stderr、結果摘要完整落地，方便事後追查。舊日誌依 `keepRecentTurns` 自動清理。
-- **SIGINT / SIGTERM 處理**：收到信號後在當前 turn 結束時優雅停止，不會在 phase 執行途中強制中斷。
+Legacy configs that use top-level `command` inside phases are still supported.
+New configs should prefer `phase.run`.
 
----
+## Methodology docs
 
-## Log and State Layout
-
-所有 runtime 產物預設在 `.zhuge-loop/` 目錄下：
-
-```
-.zhuge-loop/
-  zhuge-loop.lock          # 單實例鎖（執行中存在，結束時刪除）
-  state.json               # turn 計數器、最近結果、連續失敗數
-  HALT.log                 # 熔斷停機記錄（觸發時才出現）
-  logs/
-    turn-000000-20260219T.../
-      context.json         # 該 turn 的 profile、phases 資訊
-      01-plan.stdout.log   # phase stdout
-      01-plan.stderr.log   # phase stderr
-      02-implement.stdout.log
-      02-implement.stderr.log
-      result.json          # turn 結果（結構化）
-      result.md            # turn 結果（人類可讀）
-```
+- `docs/METHODOLOGY.md`
+- `docs/ARCHITECTURE.md`
 
 ---
 
-## Available Presets
+## 中文說明（重點版）
 
-用 `--preset` 指定初始化模板：
+`zhuge-loop` 是一個可長時間運行的自動開發迴圈引擎，核心目標是「穩定地一輪一輪交付最小切片」。
+
+主要特性：
+
+- 單實例鎖（避免雙實例互相衝突）
+- stale lock 自動清理
+- 依 turn 輪替 profile（主線/維護/策略）
+- 連續失敗熔斷（避免錯誤無限循環）
+- 每輪完整落地日誌，方便追查
+
+最簡單使用流程：
 
 ```bash
-npx zhuge-loop init --preset <name>
+npm install
+node src/cli.js init
+# 修改 zhuge.config.json 內 phases
+node src/cli.js run --once
+node src/cli.js run
 ```
 
-| Preset | 說明 |
-|--------|------|
-| `zhuge-solo` | 單 agent，三個 phase（plan / implement / verify），預設 |
-| `zhuge-team` | 三位武將輪替（zhuge / zhaoyun / guanyu） |
-| `node-lib` | Node.js 專案（verify: `npm test`） |
-| `react-vite` | React / Vite 專案（verify: `npx vitest run`） |
-| `python` | Python 專案（verify: `pytest`） |
-| `generic` | 通用（verify: `echo ok`） |
-| `claude-code` | Claude Code CLI 作為 implement agent |
-| `kiro` | Kiro CLI 作為 implement agent |
+這個工具本身不依賴 OpenClaw。phase 可以是 shell 指令，也可以是 Kiro phase。
+Kiro phase 會自動拿到每輪 repo context 與上一 phase 的 handoff；shell phase 則透過環境變數拿到相同資訊。
+若啟用 Linear integration，runtime 也會查詢目前任務、把任務清單注入指定 phase，並自動處理 `[LINEAR_NEW_TASK]` / `[LINEAR_ACTIVE]` / `[LINEAR_DONE]` markers。
+若啟用 `repoPolicy.autoCommitAfterEachPhase` / `autoPushAfterEachPhase`，runtime 會在 phase 成功後自動 commit / push。
 
 ---
 
-## CLI 命令一覽
+## Optional integration: OpenClaw bridge
 
-```bash
-npx zhuge-loop quickstart                     # 偵測、產 config、跑第一輪
-npx zhuge-loop init                           # 互動式設定精靈
-npx zhuge-loop init --preset zhuge-team       # 用指定 preset 產 config
-npx zhuge-loop run --once                     # 跑一輪
-npx zhuge-loop run                            # 持續運行
-npx zhuge-loop doctor                         # 檢查 phase 命令是否可用
-npx zhuge-loop doctor --strict                # 嚴格檢查（含目錄權限、git 狀態）
-```
+If you already use OpenClaw as your control plane, plug it in as phase commands only.
+Zhuge Loop remains the runtime/orchestrator.
 
----
+Example config: `examples/openclaw-bridge.zhuge.config.json`
 
-## Config Reference
+## Optional integration: Kiro bridge
 
-完整 config 欄位：
+If you already use Kiro CLI / ACP, use the built-in `kiro` runner in phase definitions.
+The runtime will try ACP first and fall back to `kiro-cli-chat` for the same phase.
 
-| 欄位 | 型別 | 預設值 | 說明 |
-|------|------|--------|------|
-| `name` | string | `"zhuge-loop"` | 專案名稱 |
-| `repoDir` | string | `"."` | 專案根目錄（相對於 config 檔位置） |
-| `runtimeDir` | string | `".zhuge-loop"` | runtime 產物目錄 |
-| `sleepMs` | number | `120000` | 每輪之間的等待時間（毫秒） |
-| `maxConsecutiveFailures` | number | `3` | 連續失敗幾次後熔斷停機 |
-| `keepRecentTurns` | number | `30` | 保留最近幾輪的日誌 |
-| `profileRotation` | string[] | `["default"]` | profile 輪替順序 |
-| `profiles` | object | -- | 各 profile 定義 |
-| `profiles.<name>.description` | string | -- | profile 描述 |
-| `profiles.<name>.phases` | array | -- | 有序的 phase 列表 |
-| `profiles.<name>.phases[].id` | string | -- | phase 識別名稱 |
-| `profiles.<name>.phases[].command` | string | -- | 要執行的 shell 命令 |
-| `profiles.<name>.phases[].timeoutMs` | number | `600000` | phase 超時（毫秒） |
-| `profiles.<name>.phases[].allowFailure` | boolean | `false` | 是否允許該 phase 失敗而不中斷 turn |
+Example config: `examples/kiro.zhuge.config.json`
 
----
+## 進階整合：OpenClaw 橋接（可選）
 
-## FAQ
+若你已經用 OpenClaw 做控制面，可以把 OpenClaw 指令填進 shell phase。
+核心 orchestrator 仍然是 Zhuge Loop，不會被綁定在 OpenClaw。
 
-**Q: 需要什麼環境？**
-A: Node.js >= 20，沒有其他依賴。
+## 進階整合：Kiro（可選）
 
-**Q: 可以不用三國主題嗎？**
-A: 可以。用 `--preset generic` 就是一個乾淨的 plan / implement / verify 迴圈，不帶任何武將命名。
-
-**Q: phase 的 command 可以放什麼？**
-A: 任何可在 terminal 執行的 shell 命令。可以是 `npm test`、`pytest`、`claude --dangerously-skip-permissions -p "..."`，或你自己的腳本。
-
-**Q: 連續失敗熔斷後怎麼恢復？**
-A: 修復問題後直接 `npx zhuge-loop run`。熔斷只是停止迴圈，不會修改 state。上次的 turn 編號會繼續遞增。
-
-**Q: 可以同時跑多個 instance 嗎？**
-A: 不行。同一個 `.zhuge-loop/` 目錄下只允許一個 process，由 lock 機制保證。如果前一個 process 已死亡，lock 會自動清理。
-
-**Q: 如何查看某一輪的執行結果？**
-A: 看 `.zhuge-loop/logs/turn-*/result.md`，裡面有 profile、各 phase 的 exit code、耗時和錯誤摘要。
-
----
-
-## License
-
-MIT
-
-## Contributors
-
-This project welcomes contributions. See issues for details.
+若你已經用 Kiro CLI / ACP，可以在 phase 內使用 `run.kind = "kiro"`。
+runtime 會優先走 ACP，失敗時自動回退到 `kiro-cli-chat`。

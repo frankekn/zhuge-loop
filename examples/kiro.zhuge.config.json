@@ -1,0 +1,66 @@
+{
+  "name": "zhuge-loop-with-kiro",
+  "repoDir": "..",
+  "sleepMs": 120000,
+  "maxConsecutiveFailures": 3,
+  "keepRecentTurns": 20,
+  "context": {
+    "commands": [
+      {
+        "name": "git-status",
+        "command": "git status --porcelain",
+        "timeoutMs": 5000,
+        "maxLines": 50
+      },
+      {
+        "name": "git-log",
+        "command": "git log -10 --oneline",
+        "timeoutMs": 5000,
+        "maxLines": 50
+      }
+    ]
+  },
+  "kiro": {
+    "acpCommand": "kiro-acp",
+    "cliCommand": "kiro-cli-chat",
+    "trustAllTools": true,
+    "fallbackToCli": true
+  },
+  "profileRotation": ["default"],
+  "profiles": {
+    "default": {
+      "description": "Use Kiro phases for planning and implementation, then shell verify",
+      "phases": [
+        {
+          "id": "plan",
+          "run": {
+            "kind": "kiro",
+            "agent": "zhuge",
+            "prompt": "Choose the smallest shippable slice and explain the plan."
+          },
+          "timeoutMs": 600000,
+          "allowFailure": false
+        },
+        {
+          "id": "implement",
+          "run": {
+            "kind": "kiro",
+            "agent": "zhaoyun",
+            "prompt": "Implement the selected slice and summarize what changed."
+          },
+          "timeoutMs": 1200000,
+          "allowFailure": false
+        },
+        {
+          "id": "verify",
+          "run": {
+            "kind": "shell",
+            "command": "npm test"
+          },
+          "timeoutMs": 900000,
+          "allowFailure": false
+        }
+      ]
+    }
+  }
+}

@@ -1,7 +1,16 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { collectRepoContext, composeKiroPrompt, truncateHandoff } from './context.js'
 import { acquireLock, releaseLock } from './lock.js'
-import { runCommand } from './runner.js'
+import {
+  buildLinearContext,
+  parseLinearMarkers,
+  processLinearMarkers,
+  queryLinearTasks,
+  shouldInjectLinearContext,
+} from './linear.js'
+import { commitWorkingTreeIfDirty, ensureOnDeliveryBranch, pushBranchIfNeeded } from './repo.js'
+import { runCommand, runPhase } from './runner.js'
 import { loadState, saveState, recordTurnResult } from './state.js'
 import {
   appendText,
@@ -30,7 +39,16 @@ async function writeTurnResultMarkdown(turnDir, turnResult) {
   ]
 
   for (const phase of turnResult.phases) {
-    lines.push(`- ${phase.id}: code=${phase.code}, duration=${phase.durationMs}ms${phase.timedOut ? ', timeout=true' : ''}`)
+    const details = [
+      phase.kind ? `kind=${phase.kind}` : null,
+      phase.agent ? `agent=${phase.agent}` : null,
+      phase.adapterUsed ? `adapter=${phase.adapterUsed}` : null,
+      `code=${phase.code}`,
+      `duration=${phase.durationMs}ms`,
+      phase.timedOut ? 'timeout=true' : null,
+      phase.fallbackUsed ? 'fallback=true' : null,
+    ].filter(Boolean)
+    lines.push(`- ${phase.id}: ${details.join(', ')}`)
   }
 
   if (!turnResult.ok) {
@@ -60,12 +78,38 @@ async function runTurn(config, state, turnDir) {
   const profileName = nextProfileName(state, config.profileRotation)
   const profile = config.profiles[profileName]
   const turnStart = Date.now()
+  const turnLabel = `Turn ${state.turn}`
+
+  if (config.repoPolicy?.pushBranch) {
+    await ensureOnDeliveryBranch(config, {
+      env: process.env,
+      turnLabel,
+    })
+  }
+
+  const repoContext = await collectRepoContext(config, runCommand, {
+    env: process.env,
+  })
+  const repoContextPath = path.join(turnDir, 'repo-context.txt')
+  await fs.writeFile(repoContextPath, repoContext, 'utf8')
+  let linearTasks = await queryLinearTasks(config, {
+    env: process.env,
+  })
+  let linearContext = buildLinearContext(
+    linearTasks,
+    Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
+  )
+  const linearContextPath = path.join(turnDir, 'linear-context.txt')
+  await fs.writeFile(linearContextPath, linearContext, 'utf8')
 
   const context = {
     turn: state.turn,
     timestamp: nowIso(),
     profileName,
     profileDescription: profile.description ?? '',
+    repoContextPath,
+    linearContextPath,
+    contextCommands: config.context?.commands ?? [],
     phases: profile.phases,
   }
   await writeJson(path.join(turnDir, 'context.json'), context)
@@ -73,33 +117,157 @@ async function runTurn(config, state, turnDir) {
   const phaseResults = []
   let ok = true
   let errorSummary = null
+  let handoff = ''
+  let activeTask = null
+
+  const resolveActiveTask = (marker, tasks) => {
+    if (!marker) return null
+    if (marker.issueId) {
+      return tasks?.find((task) => task.id === marker.issueId) ?? { id: marker.issueId }
+    }
+    if (marker.identifier) {
+      const normalized = String(marker.identifier).trim().toUpperCase()
+      return tasks?.find((task) => String(task.identifier ?? '').trim().toUpperCase() === normalized) ?? {
+        identifier: normalized,
+      }
+    }
+    if (marker.title) {
+      const normalized = String(marker.title).trim().toLowerCase()
+      return tasks?.find((task) => String(task.title ?? '').trim().toLowerCase() === normalized) ?? {
+        title: String(marker.title).trim(),
+      }
+    }
+    return null
+  }
 
   for (let index = 0; index < profile.phases.length; index += 1) {
     const phase = profile.phases[index]
-    const result = await runCommand(phase.command, {
+    const phaseRun = phase.run ?? (phase.command ? { kind: 'shell', command: phase.command } : null)
+    const prefix = String(index + 1).padStart(2, '0')
+    const handoffPath = path.join(turnDir, `${prefix}-${phase.id}.handoff.txt`)
+    await fs.writeFile(handoffPath, handoff, 'utf8')
+
+    let promptPath = null
+    let phaseToRun = phase
+    if (phaseRun?.kind === 'kiro') {
+      const prompt = composeKiroPrompt(phaseRun.prompt, {
+        repoContext,
+        linearContext: shouldInjectLinearContext(config, phase.id) ? linearContext : '',
+        handoff,
+      })
+      promptPath = path.join(turnDir, `${prefix}-${phase.id}.prompt.txt`)
+      await fs.writeFile(promptPath, prompt, 'utf8')
+      phaseToRun = {
+        ...phase,
+        run: {
+          ...phaseRun,
+          prompt,
+        },
+      }
+    }
+
+    const result = await runPhase(phaseToRun, {
       cwd: config.repoDir,
-      timeoutMs: phase.timeoutMs,
       env: {
         ...process.env,
         ZHUGE_TURN: String(state.turn),
         ZHUGE_PROFILE: profileName,
         ZHUGE_PHASE: phase.id,
+        ZHUGE_REPO_CONTEXT: repoContext,
+        ZHUGE_REPO_CONTEXT_PATH: repoContextPath,
+        ZHUGE_LINEAR_CONTEXT: linearContext,
+        ZHUGE_LINEAR_CONTEXT_PATH: linearContextPath,
+        ZHUGE_HANDOFF: handoff,
+        ZHUGE_HANDOFF_PATH: handoffPath,
       },
+      kiro: config.kiro,
     })
 
     const phaseResult = {
       id: phase.id,
-      command: phase.command,
+      kind: result.kind ?? phaseRun?.kind,
+      command: phaseRun?.kind === 'shell' ? phaseRun.command : undefined,
+      agent: phaseRun?.kind === 'kiro' ? phaseRun.agent : undefined,
       code: result.code,
       timedOut: result.timedOut,
       durationMs: result.durationMs,
       allowFailure: Boolean(phase.allowFailure),
+      adapterUsed: result.adapterUsed,
+      fallbackUsed: result.fallbackUsed,
     }
+
+    const markers = parseLinearMarkers(result.out)
+    if (markers.length > 0) {
+      phaseResult.linearMarkers = markers
+      await processLinearMarkers(config, markers, phase.id, linearTasks ?? [], {
+        env: process.env,
+      })
+      linearTasks = (await queryLinearTasks(config, {
+        env: process.env,
+      })) ?? linearTasks
+      linearContext = buildLinearContext(
+        linearTasks,
+        Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
+      )
+      await fs.writeFile(linearContextPath, linearContext, 'utf8')
+
+      const resolvedActiveTask = resolveActiveTask(
+        markers.find((marker) => marker.type === 'active'),
+        linearTasks
+      )
+      if (resolvedActiveTask) {
+        activeTask = resolvedActiveTask
+      }
+    }
+
     phaseResults.push(phaseResult)
 
-    const prefix = String(index + 1).padStart(2, '0')
     await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stdout.log`), result.out, 'utf8')
     await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stderr.log`), result.err, 'utf8')
+    if (result.kind === 'kiro' && phaseRun?.kind === 'kiro') {
+      const metadataPath = path.join(turnDir, `${prefix}-${phase.id}.meta.json`)
+      phaseResult.metadataPath = metadataPath
+      await writeJson(metadataPath, {
+        kind: 'kiro',
+        agent: phaseRun.agent,
+        adapterRequested: result.adapterRequested ?? 'acp',
+        adapterUsed: result.adapterUsed ?? 'acp',
+        fallbackUsed: Boolean(result.fallbackUsed),
+        timedOut: Boolean(result.timedOut),
+        durationMs: result.durationMs,
+        sessionId: result.metadata?.sessionId ?? null,
+        contextUsagePercentage: result.metadata?.contextUsagePercentage ?? null,
+        metadataEvents: Array.isArray(result.metadata?.metadataEvents) ? result.metadata.metadataEvents : [],
+        repoContextPath,
+        linearContextPath,
+        handoffPath,
+        promptPath,
+        repoContextIncluded: Boolean(repoContext),
+        linearContextIncluded: Boolean(shouldInjectLinearContext(config, phase.id) && linearContext),
+        handoffIncluded: Boolean(handoff),
+      })
+    }
+
+    handoff = truncateHandoff(result.out)
+
+    if (result.code === 0) {
+      const commitResult = await commitWorkingTreeIfDirty(config, {
+        env: process.env,
+        activeTask,
+        phaseId: phase.id,
+        turnLabel,
+      })
+      if (commitResult.committed) {
+        phaseResult.commitSubject = commitResult.subject
+        const pushResult = await pushBranchIfNeeded(config, {
+          env: process.env,
+          turnLabel,
+        })
+        if (pushResult.pushed) {
+          phaseResult.pushedBranch = pushResult.branch
+        }
+      }
+    }
 
     if (result.code !== 0 && !phase.allowFailure) {
       ok = false
