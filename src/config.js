@@ -4,6 +4,72 @@ import { DEFAULT_CONTEXT_COMMANDS } from './context.js'
 import { DEFAULT_LINEAR_PROMPT_PHASE_IDS } from './linear.js'
 import { resolveFrom } from './utils.js'
 
+function buildSoloPreset(name, verifyCommand, implementCommand) {
+  return {
+    name,
+    sleepMs: 120_000,
+    maxConsecutiveFailures: 3,
+    keepRecentTurns: 30,
+    profileRotation: ['default'],
+    profiles: {
+      default: {
+        description: 'Plan -> implement -> verify in small slices',
+        phases: [
+          { id: 'plan', command: 'echo "[plan] choose the smallest shippable slice"', timeoutMs: 600_000, allowFailure: false },
+          { id: 'implement', command: implementCommand ?? 'echo "[implement] run your agent or script here"', timeoutMs: 1_200_000, allowFailure: false },
+          { id: 'verify', command: verifyCommand, timeoutMs: 900_000, allowFailure: false },
+        ],
+      },
+    },
+  }
+}
+
+export const PRESETS = Object.freeze({
+  'zhuge-solo': buildSoloPreset('zhuge-solo', 'npm test'),
+  'zhuge-team': {
+    name: 'zhuge-team',
+    sleepMs: 120_000,
+    maxConsecutiveFailures: 3,
+    keepRecentTurns: 30,
+    profileRotation: ['zhuge', 'zhaoyun', 'guanyu'],
+    profiles: {
+      zhuge: { description: '諸葛亮 (協調)', phases: [{ id: 'plan', command: 'echo "[zhuge] break the task into small slices"', timeoutMs: 600_000, allowFailure: false }] },
+      zhaoyun: { description: '趙雲 (實作)', phases: [{ id: 'implement', command: 'echo "[zhaoyun] implement the next slice"', timeoutMs: 1_200_000, allowFailure: false }, { id: 'verify', command: 'npm test', timeoutMs: 900_000, allowFailure: false }] },
+      guanyu: { description: '關羽 (審查)', phases: [{ id: 'review', command: 'echo "[guanyu] review recent changes"', timeoutMs: 600_000, allowFailure: false }] },
+    },
+  },
+  'node-lib': buildSoloPreset('node-lib', 'npm test'),
+  'react-vite': buildSoloPreset('react-vite', 'npx vitest run'),
+  'python': buildSoloPreset('python', 'pytest'),
+  'generic': buildSoloPreset('generic', 'echo ok'),
+  'claude-code': buildSoloPreset('claude-code', 'npm test', 'claude --dangerously-skip-permissions -p "implement the next task"'),
+  'kiro': buildSoloPreset('kiro', 'npm test', 'kiro task run'),
+})
+
+const TEST_COMMANDS = { 'node-lib': 'npm test', 'react-vite': 'npx vitest run', 'python': 'pytest', 'generic': 'echo ok' }
+
+export function testCommandForProjectType(projectType) {
+  return TEST_COMMANDS[projectType] ?? 'echo ok'
+}
+
+export async function detectProjectType(repoDir) {
+  const exists = async (name) => { try { await fs.access(path.join(repoDir, name)); return true } catch { return false } }
+  if (await exists('vite.config.ts') || await exists('vite.config.js') || await exists('vite.config.mjs')) return 'react-vite'
+  if (await exists('package.json')) return 'node-lib'
+  if (await exists('pyproject.toml') || await exists('requirements.txt')) return 'python'
+  return 'generic'
+}
+
+export function patchVerifyCommand(config, testCommand) {
+  const patched = structuredClone(config)
+  for (const profile of Object.values(patched.profiles)) {
+    for (const phase of profile.phases) {
+      if (phase.id === 'verify') phase.command = testCommand
+    }
+  }
+  return patched
+}
+
 const DEFAULT_CONFIG = {
   name: 'zhuge-loop',
   repoDir: '.',
