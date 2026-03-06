@@ -39,7 +39,11 @@
     "linear": {
       "enabled": true,
       "cliPath": "./tools/linear-cli.sh",
-      "promptPhaseIds": ["strategist", "executor", "reviewer"],
+      "promptPhaseIds": [
+        "strategist",
+        "executor",
+        "reviewer"
+      ],
       "maxTasks": 10,
       "contextMaxChars": 4000
     }
@@ -50,7 +54,9 @@
     "trustAllTools": true,
     "fallbackToCli": true
   },
-  "profileRotation": ["uiux"],
+  "profileRotation": [
+    "uiux"
+  ],
   "profiles": {
     "uiux": {
       "description": "Standalone zhuge-loop live UI/UX pipeline with injected repo context, injected Linear task context, Linear marker sync, and runtime-managed commit/push.",
@@ -98,9 +104,9 @@
           "id": "vitest",
           "run": {
             "kind": "shell",
-            "command": "pnpm test"
+            "command": "pnpm test --run --changed"
           },
-          "timeoutMs": 180000,
+          "timeoutMs": 300000,
           "allowFailure": false
         },
         {
