@@ -43,6 +43,130 @@ async function isWorkingTreeClean(cwd, env = process.env) {
   return !status.trim()
 }
 
+function parseLines(text) {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function normalizeRepoPath(filePath) {
+  return String(filePath ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+}
+
+function normalizeIgnoredPaths(paths) {
+  return Array.isArray(paths)
+    ? paths
+        .map((filePath) => normalizeRepoPath(filePath))
+        .filter(Boolean)
+        .sort()
+    : []
+}
+
+function shouldIgnorePath(filePath, ignoredPaths) {
+  const normalized = normalizeRepoPath(filePath)
+  if (!normalized) return false
+  return ignoredPaths.some((ignoredPath) => (
+    normalized === ignoredPath || normalized.startsWith(`${ignoredPath}/`)
+  ))
+}
+
+function extractStatusPaths(line) {
+  const raw = String(line ?? '').slice(3).trim()
+  if (!raw) return []
+  return raw
+    .split(' -> ')
+    .map((filePath) => normalizeRepoPath(filePath.replace(/^"|"$/g, '')))
+    .filter(Boolean)
+}
+
+function filterStatusOutput(text, ignoredPaths) {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .filter((line) => {
+      const paths = extractStatusPaths(line)
+      return paths.length === 0 || paths.some((filePath) => !shouldIgnorePath(filePath, ignoredPaths))
+    })
+    .join('\n')
+}
+
+export async function captureWorktreeSnapshot(repoDir, options = {}) {
+  const env = options.env ?? process.env
+  const ignoredPaths = normalizeIgnoredPaths(options.ignorePaths)
+  const inside = await commandSucceeds('git rev-parse --is-inside-work-tree', repoDir, 5_000, env)
+  if (!inside) return null
+
+  const [head, branch, status] = await Promise.all([
+    requireSuccess('git rev-parse HEAD', repoDir, 5_000, env).catch(() => ''),
+    requireSuccess('git rev-parse --abbrev-ref HEAD', repoDir, 5_000, env).catch(() => ''),
+    requireSuccess('git status --porcelain=v1', repoDir, 5_000, env).catch(() => ''),
+  ])
+
+  return {
+    head: String(head ?? '').trim(),
+    branch: String(branch ?? '').trim(),
+    status: filterStatusOutput(status, ignoredPaths).trim(),
+  }
+}
+
+export function sameWorktreeSnapshot(left, right) {
+  if (!left || !right) return false
+  return (
+    String(left.head ?? '') === String(right.head ?? '') &&
+    String(left.branch ?? '') === String(right.branch ?? '') &&
+    String(left.status ?? '') === String(right.status ?? '')
+  )
+}
+
+export async function listFilesChangedSinceSnapshot(repoDir, snapshot, options = {}) {
+  if (!snapshot?.head) {
+    return { reliable: false, files: [] }
+  }
+
+  const env = options.env ?? process.env
+  const ignoredPaths = normalizeIgnoredPaths(options.ignorePaths)
+  if (String(snapshot.status ?? '').trim()) {
+    return { reliable: false, files: [] }
+  }
+
+  const current = await captureWorktreeSnapshot(repoDir, {
+    env,
+    ignorePaths: ignoredPaths,
+  })
+  if (!current) {
+    return { reliable: false, files: [] }
+  }
+
+  const files = new Set()
+  const commands = []
+
+  if (snapshot.head !== current.head) {
+    commands.push(`git diff --name-only ${JSON.stringify(snapshot.head)} ${JSON.stringify(current.head)}`)
+  }
+
+  commands.push('git diff --name-only')
+  commands.push('git diff --cached --name-only')
+  commands.push('git ls-files --others --exclude-standard')
+
+  for (const command of commands) {
+    const output = await requireSuccess(command, repoDir, 10_000, env).catch(() => '')
+    for (const filePath of parseLines(output)) {
+      if (shouldIgnorePath(filePath, ignoredPaths)) continue
+      files.add(filePath)
+    }
+  }
+
+  return {
+    reliable: true,
+    files: [...files].sort(),
+  }
+}
+
 function formatAutoCommitMessage(ctx = {}) {
   const phaseId = compactOneLine(ctx.phaseId || 'phase', 24).toLowerCase()
   const identifier = compactOneLine(ctx.activeTask?.identifier, 32)

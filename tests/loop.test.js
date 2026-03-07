@@ -253,6 +253,34 @@ function runLocalCommand(command, cwd, env = process.env) {
   })
 }
 
+async function captureConsoleLogs(fn) {
+  const original = console.log
+  const lines = []
+  console.log = (...args) => {
+    lines.push(args.map((arg) => String(arg)).join(' '))
+  }
+
+  try {
+    const result = await fn()
+    return { result, lines }
+  } finally {
+    console.log = original
+  }
+}
+
+async function waitFor(check, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 5_000
+  const intervalMs = options.intervalMs ?? 25
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await check()) return
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+
+  throw new Error(`Timed out after ${timeoutMs}ms`)
+}
+
 async function initGitRepoWithRemote(repoDir) {
   const remoteDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-remote-'))
   await runLocalCommand('git init --bare', remoteDir)
@@ -270,6 +298,14 @@ async function initGitRepoWithRemote(repoDir) {
 async function getOnlyTurnDir(logsDir) {
   const [turnDirName] = await fs.readdir(logsDir)
   return path.join(logsDir, turnDirName)
+}
+
+async function getTurnDirs(logsDir) {
+  const entries = await fs.readdir(logsDir)
+  return entries
+    .filter((entry) => entry.startsWith('turn-'))
+    .sort()
+    .map((entry) => path.join(logsDir, entry))
 }
 
 test('runLoop --once completes one successful turn', async () => {
@@ -502,6 +538,207 @@ test('runLoop exposes repo context and handoff env vars to shell phases', async 
   assert.equal(parsed.handoff, 'shell handoff')
   assert.equal(parsed.repoContextPath, path.join(turnDir, 'repo-context.txt'))
   assert.equal(parsed.handoffPath, path.join(turnDir, '02-inspect.handoff.txt'))
+})
+
+test('runLoop skips reviewer phase when reviewerPolicy is skip', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-reviewer-skip-'))
+  const config = buildLoopConfig(
+    repoDir,
+    [
+      buildShellPhase(
+        'executor',
+        `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n')"`
+      ),
+      buildShellPhase(
+        'reviewer',
+        `node -e "const fs=require('fs'); fs.appendFileSync('feature.txt','reviewer\\n'); process.exit(9)"`
+      ),
+    ],
+    {
+      reviewerPolicy: 'skip',
+    }
+  )
+
+  const { result, lines } = await captureConsoleLogs(() => runLoop(config, { once: true }))
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.state.results[0].phases[1].skipped, true)
+  assert.equal(result.state.results[0].phases[1].skipReason, 'skip')
+  assert.match(lines.join('\n'), /\[Turn 0\] Skipping reviewer \(policy: skip\)/)
+
+  const turnDir = await getOnlyTurnDir(config.logsDir)
+  const stdout = await fs.readFile(path.join(turnDir, '02-reviewer.stdout.log'), 'utf8')
+  const resultMd = await fs.readFile(path.join(turnDir, 'result.md'), 'utf8')
+  const feature = await fs.readFile(path.join(repoDir, 'feature.txt'), 'utf8')
+  assert.equal(stdout, '')
+  assert.match(resultMd, /skipped=skip/)
+  assert.equal(feature, 'executor\n')
+})
+
+test('runLoop preserves reviewer phase when reviewerPolicy is always', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-reviewer-always-'))
+  const config = buildLoopConfig(
+    repoDir,
+    [
+      buildShellPhase(
+        'executor',
+        `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n')"`
+      ),
+      buildShellPhase(
+        'reviewer',
+        `node -e "const fs=require('fs'); fs.appendFileSync('feature.txt','reviewer\\n')"`
+      ),
+    ],
+    {
+      reviewerPolicy: 'always',
+    }
+  )
+
+  const result = await runLoop(config, { once: true })
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.state.results[0].phases[1].skipped, undefined)
+
+  const feature = await fs.readFile(path.join(repoDir, 'feature.txt'), 'utf8')
+  assert.equal(feature, 'executor\nreviewer\n')
+})
+
+test('runLoop skips reviewer in risk-based mode for style-only executor changes', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-reviewer-risk-'))
+  await initGitRepoWithRemote(repoDir)
+  const config = buildLoopConfig(
+    repoDir,
+    [
+      buildShellPhase(
+        'executor',
+        `node -e "const fs=require('fs'); fs.mkdirSync('src',{recursive:true}); fs.writeFileSync('src/app.css','body{}\\n')"`
+      ),
+      buildShellPhase(
+        'reviewer',
+        `node -e "process.exit(5)"`
+      ),
+    ],
+    {
+      reviewerPolicy: 'risk-based',
+    }
+  )
+
+  const { result, lines } = await captureConsoleLogs(() => runLoop(config, { once: true }))
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.state.results[0].phases[1].skipped, true)
+  assert.equal(result.state.results[0].phases[1].skipReason, 'risk-based')
+  assert.match(lines.join('\n'), /\[Turn 0\] Skipping reviewer \(policy: risk-based\)/)
+})
+
+test('runLoop reuses prefetched strategist on the next turn when pipeline is enabled', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-pipeline-prefetch-'))
+  const strategistEventsPath = path.join(
+    await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-pipeline-events-')),
+    'strategist-events.log'
+  )
+  const config = buildLoopConfig(
+    repoDir,
+    [
+      buildShellPhase(
+        'strategist',
+        `STRATEGIST_EVENTS=${JSON.stringify(strategistEventsPath)} node -e "const fs=require('fs'); fs.appendFileSync(process.env.STRATEGIST_EVENTS, process.env.ZHUGE_TURN + '\\n'); console.log('[HANDOFF] prefetched-turn-' + process.env.ZHUGE_TURN)"`
+      ),
+      buildShellPhase(
+        'executor',
+        `node -e "console.log('executor handoff=' + process.env.ZHUGE_HANDOFF)"`
+      ),
+      buildShellPhase(
+        'reviewer',
+        `node -e "if (process.env.ZHUGE_TURN==='1') process.exit(1); console.log('review ok')"`
+      ),
+    ],
+    {
+      pipeline: true,
+      maxConsecutiveFailures: 1,
+      sleepMs: 100,
+    }
+  )
+
+  const result = await runLoop(config, { once: false })
+  assert.equal(result.exitCode, 50)
+  assert.equal(result.state.turn, 2)
+  assert.equal(result.state.results[1].phases[0].prefetched, true)
+
+  const turnDirs = await getTurnDirs(config.logsDir)
+  const secondTurnDir = turnDirs[1]
+  const secondTurnContext = JSON.parse(await fs.readFile(path.join(secondTurnDir, 'context.json'), 'utf8'))
+  const secondTurnStrategistOut = await fs.readFile(path.join(secondTurnDir, '01-strategist.stdout.log'), 'utf8')
+  const secondTurnExecutorOut = await fs.readFile(path.join(secondTurnDir, '02-executor.stdout.log'), 'utf8')
+  const strategistEvents = (await fs.readFile(strategistEventsPath, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+
+  assert.equal(secondTurnContext.prefetchedStrategistUsed, true)
+  assert.match(secondTurnStrategistOut, /prefetched-turn-1/)
+  assert.match(secondTurnExecutorOut, /executor handoff=prefetched-turn-1/)
+  assert.deepEqual(strategistEvents, ['0', '1'])
+})
+
+test('runLoop discards stale strategist prefetch when the worktree changes', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-pipeline-stale-'))
+  await initGitRepoWithRemote(repoDir)
+  const strategistEventsPath = path.join(
+    await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-pipeline-stale-events-')),
+    'strategist-events.log'
+  )
+  const config = buildLoopConfig(
+    repoDir,
+    [
+      buildShellPhase(
+        'strategist',
+        `STRATEGIST_EVENTS=${JSON.stringify(strategistEventsPath)} node -e "const fs=require('fs'); fs.appendFileSync(process.env.STRATEGIST_EVENTS, process.env.ZHUGE_TURN + '\\n'); console.log('[HANDOFF] stale-turn-' + process.env.ZHUGE_TURN)"`
+      ),
+      buildShellPhase(
+        'executor',
+        `node -e "console.log('executor handoff=' + process.env.ZHUGE_HANDOFF)"`
+      ),
+      buildShellPhase(
+        'reviewer',
+        `node -e "if (process.env.ZHUGE_TURN==='1') process.exit(1); console.log('review ok')"`
+      ),
+    ],
+    {
+      pipeline: { enabled: true },
+      maxConsecutiveFailures: 1,
+      sleepMs: 250,
+    }
+  )
+
+  const { result, lines } = await captureConsoleLogs(async () => {
+    const loopPromise = runLoop(config, { once: false })
+
+    await waitFor(async () => {
+      const raw = await fs.readFile(strategistEventsPath, 'utf8').catch(() => '')
+      const strategistRuns = raw
+        .trim()
+        .split('\n')
+        .filter(Boolean).length
+      const lockPresent = await fs.access(config.lockPath).then(() => true).catch(() => false)
+      return strategistRuns >= 2 && lockPresent
+    })
+
+    await fs.writeFile(path.join(repoDir, 'stale-change.js'), 'console.log("changed")\n')
+    return loopPromise
+  })
+
+  assert.equal(result.exitCode, 50)
+  assert.equal(result.state.turn, 2)
+  assert.equal(result.state.results[1].phases[0].prefetched, false)
+  assert.match(lines.join('\n'), /\[Turn 1\] Discarding stale strategist prefetch/)
+
+  const turnDirs = await getTurnDirs(config.logsDir)
+  const secondTurnContext = JSON.parse(await fs.readFile(path.join(turnDirs[1], 'context.json'), 'utf8'))
+  const strategistEvents = (await fs.readFile(strategistEventsPath, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+
+  assert.equal(secondTurnContext.prefetchedStrategistUsed, false)
+  assert.deepEqual(strategistEvents, ['0', '1', '1'])
 })
 
 test('runLoop processes linear markers and auto-commits/pushes to delivery branch', async () => {

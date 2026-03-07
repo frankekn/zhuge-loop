@@ -104,6 +104,65 @@ test('normalizeConfig accepts custom context commands', () => {
   ])
 })
 
+test('normalizeConfig defaults reviewerPolicy to always and accepts risk-based', () => {
+  const defaulted = normalizeConfig(
+    {
+      profileRotation: ['default'],
+      profiles: {
+        default: {
+          phases: [{ id: 'shell', command: 'echo ok', timeoutMs: 1000 }],
+        },
+      },
+    },
+    path.resolve('/tmp/zhuge.config.json')
+  )
+  assert.equal(defaulted.reviewerPolicy, 'always')
+
+  const riskBased = normalizeConfig(
+    {
+      reviewerPolicy: 'risk-based',
+      profileRotation: ['default'],
+      profiles: {
+        default: {
+          phases: [{ id: 'shell', command: 'echo ok', timeoutMs: 1000 }],
+        },
+      },
+    },
+    path.resolve('/tmp/zhuge.config.json')
+  )
+  assert.equal(riskBased.reviewerPolicy, 'risk-based')
+})
+
+test('normalizeConfig accepts pipeline as boolean or object', () => {
+  const booleanConfig = normalizeConfig(
+    {
+      pipeline: true,
+      profileRotation: ['default'],
+      profiles: {
+        default: {
+          phases: [{ id: 'shell', command: 'echo ok', timeoutMs: 1000 }],
+        },
+      },
+    },
+    path.resolve('/tmp/zhuge.config.json')
+  )
+  assert.equal(booleanConfig.pipeline.enabled, true)
+
+  const objectConfig = normalizeConfig(
+    {
+      pipeline: { enabled: true },
+      profileRotation: ['default'],
+      profiles: {
+        default: {
+          phases: [{ id: 'shell', command: 'echo ok', timeoutMs: 1000 }],
+        },
+      },
+    },
+    path.resolve('/tmp/zhuge.config.json')
+  )
+  assert.equal(objectConfig.pipeline.enabled, true)
+})
+
 test('normalizeConfig resolves repo policy and linear integration paths', () => {
   const config = normalizeConfig(
     {
@@ -232,4 +291,38 @@ test('normalizeConfig rejects invalid linear prompt phase ids', () => {
       path.resolve('/tmp/zhuge.config.json')
     )
   }, /integrations\.linear\.promptPhaseIds\[1\]/)
+})
+
+test('normalizeConfig rejects invalid reviewerPolicy', () => {
+  assert.throws(() => {
+    normalizeConfig(
+      {
+        reviewerPolicy: 'sometimes',
+        profileRotation: ['default'],
+        profiles: {
+          default: {
+            phases: [{ id: 'shell', command: 'echo ok', timeoutMs: 1000 }],
+          },
+        },
+      },
+      path.resolve('/tmp/zhuge.config.json')
+    )
+  }, /reviewerPolicy/)
+})
+
+test('normalizeConfig rejects invalid pipeline shape', () => {
+  assert.throws(() => {
+    normalizeConfig(
+      {
+        pipeline: { enabled: 'yes' },
+        profileRotation: ['default'],
+        profiles: {
+          default: {
+            phases: [{ id: 'shell', command: 'echo ok', timeoutMs: 1000 }],
+          },
+        },
+      },
+      path.resolve('/tmp/zhuge.config.json')
+    )
+  }, /pipeline/)
 })

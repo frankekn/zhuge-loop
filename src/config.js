@@ -81,6 +81,10 @@ const DEFAULT_CONFIG = {
   sleepMs: 120_000,
   maxConsecutiveFailures: 3,
   keepRecentTurns: 30,
+  reviewerPolicy: 'always',
+  pipeline: {
+    enabled: false,
+  },
   context: {
     commands: DEFAULT_CONTEXT_COMMANDS,
   },
@@ -143,6 +147,37 @@ function assertNonEmptyString(value, name) {
 function assertBoolean(value, name) {
   if (typeof value !== 'boolean') {
     throw new Error(`${name} must be boolean`)
+  }
+}
+
+function normalizeReviewerPolicy(value) {
+  const policy = String(value ?? DEFAULT_CONFIG.reviewerPolicy).trim().toLowerCase()
+  if (!['always', 'skip', 'risk-based'].includes(policy)) {
+    throw new Error('reviewerPolicy must be "always", "skip", or "risk-based"')
+  }
+  return policy
+}
+
+function normalizePipeline(pipeline) {
+  if (pipeline == null) {
+    return { ...DEFAULT_CONFIG.pipeline }
+  }
+
+  if (typeof pipeline === 'boolean') {
+    return { enabled: pipeline }
+  }
+
+  if (typeof pipeline !== 'object' || Array.isArray(pipeline)) {
+    throw new Error('pipeline must be boolean or object')
+  }
+
+  const merged = {
+    ...DEFAULT_CONFIG.pipeline,
+    ...pipeline,
+  }
+  assertBoolean(merged.enabled, 'pipeline.enabled')
+  return {
+    enabled: Boolean(merged.enabled),
   }
 }
 
@@ -327,6 +362,8 @@ export function normalizeConfig(raw, configPath = path.resolve(process.cwd(), 'z
   const merged = {
     ...DEFAULT_CONFIG,
     ...raw,
+    reviewerPolicy: normalizeReviewerPolicy(raw?.reviewerPolicy ?? DEFAULT_CONFIG.reviewerPolicy),
+    pipeline: normalizePipeline(raw?.pipeline ?? DEFAULT_CONFIG.pipeline),
     context: normalizeContext(raw?.context ?? DEFAULT_CONFIG.context),
     repoPolicy: normalizeRepoPolicy(raw?.repoPolicy ?? DEFAULT_CONFIG.repoPolicy),
     kiro: {

@@ -9,7 +9,14 @@ import {
   queryLinearTasks,
   shouldInjectLinearContext,
 } from './linear.js'
-import { commitWorkingTreeIfDirty, ensureOnDeliveryBranch, pushBranchIfNeeded } from './repo.js'
+import {
+  captureWorktreeSnapshot,
+  commitWorkingTreeIfDirty,
+  ensureOnDeliveryBranch,
+  listFilesChangedSinceSnapshot,
+  pushBranchIfNeeded,
+  sameWorktreeSnapshot,
+} from './repo.js'
 import { runCommand, runPhase } from './runner.js'
 import { loadState, saveState, recordTurnResult } from './state.js'
 import {
@@ -45,6 +52,8 @@ async function writeTurnResultMarkdown(turnDir, turnResult) {
       phase.adapterUsed ? `adapter=${phase.adapterUsed}` : null,
       `code=${phase.code}`,
       `duration=${phase.durationMs}ms`,
+      phase.prefetched ? 'prefetched=true' : null,
+      phase.skipped ? `skipped=${phase.skipReason ?? true}` : null,
       phase.timedOut ? 'timeout=true' : null,
       phase.fallbackUsed ? 'fallback=true' : null,
     ].filter(Boolean)
@@ -74,11 +83,200 @@ async function cleanOldTurnLogs(logsDir, keepRecentTurns) {
   )
 }
 
-async function runTurn(config, state, turnDir) {
+function isReviewerPhase(phaseId) {
+  const normalized = String(phaseId ?? '').trim().toLowerCase()
+  return normalized.includes('reviewer') || normalized.includes('review')
+}
+
+function isExecutorPhase(phaseId) {
+  const normalized = String(phaseId ?? '').trim().toLowerCase()
+  return normalized.includes('executor') || normalized.includes('implement')
+}
+
+function isLowRiskChangedFile(filePath) {
+  const normalized = String(filePath ?? '').trim().toLowerCase()
+  if (!normalized) return false
+
+  const ext = path.extname(normalized)
+  if (['.css', '.scss', '.sass', '.less', '.styl', '.pcss'].includes(ext)) {
+    return true
+  }
+
+  if (
+    normalized.includes('.style.') ||
+    normalized.includes('.styles.') ||
+    /(^|\/)(style|styles)(\/|$)/.test(normalized)
+  ) {
+    return true
+  }
+
+  if (
+    /(^|\/)(__tests__|tests?|specs?)(\/|$)/.test(normalized) ||
+    /(^|\/)[^/]+\.(test|spec)\.[^/]+$/.test(normalized)
+  ) {
+    return true
+  }
+
+  return false
+}
+
+async function assessReviewerRisk(config, snapshot, options = {}) {
+  const changeSet = await listFilesChangedSinceSnapshot(config.repoDir, snapshot, {
+    env: options.env ?? process.env,
+    ignorePaths: options.ignorePaths ?? [],
+  })
+
+  return {
+    ...changeSet,
+    lowRisk:
+      changeSet.reliable &&
+      changeSet.files.length > 0 &&
+      changeSet.files.every((filePath) => isLowRiskChangedFile(filePath)),
+  }
+}
+
+function internalRepoPaths(config) {
+  const repoDir = path.resolve(config.repoDir)
+  const trackedPaths = [
+    config.runtimeDir,
+    config.statePath,
+    config.logsDir,
+    config.haltLogPath,
+    config.lockPath,
+  ]
+
+  return [...new Set(
+    trackedPaths
+      .map((filePath) => {
+        if (!filePath) return null
+        const relativePath = path.relative(repoDir, path.resolve(filePath))
+        if (!relativePath || relativePath.startsWith('..')) return null
+        return relativePath.replace(/\\/g, '/')
+      })
+      .filter(Boolean)
+  )]
+}
+
+function isPipelineEnabled(config) {
+  return config.pipeline === true || Boolean(config.pipeline?.enabled)
+}
+
+async function loadTurnInputs(config, options = {}) {
+  const repoContext = options.repoContext ?? await collectRepoContext(config, runCommand, {
+    env: options.env ?? process.env,
+  })
+  const linearTasks = options.linearTasks ?? await queryLinearTasks(config, {
+    env: options.env ?? process.env,
+  })
+  const linearContext = options.linearContext ?? buildLinearContext(
+    linearTasks,
+    Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
+  )
+
+  return {
+    repoContext,
+    linearTasks,
+    linearContext,
+  }
+}
+
+function strategistPhaseDescriptor(profile) {
+  const phase = profile?.phases?.[0]
+  if (!phase) return null
+  const normalized = String(phase.id ?? '').trim().toLowerCase()
+  if (!normalized.includes('strategist')) return null
+  return {
+    phase,
+    index: 0,
+  }
+}
+
+async function prefetchStrategistPhase(config, state, options = {}) {
+  const profileName = nextProfileName(state, config.profileRotation)
+  const profile = config.profiles[profileName]
+  const descriptor = strategistPhaseDescriptor(profile)
+  if (!descriptor) return null
+
+  const env = options.env ?? process.env
+  const ignoredRepoPaths = options.ignorePaths ?? internalRepoPaths(config)
+  const snapshotBefore = await captureWorktreeSnapshot(config.repoDir, {
+    env,
+    ignorePaths: ignoredRepoPaths,
+  })
+  const inputs = await loadTurnInputs(config, { env })
+  const phaseRun = descriptor.phase.run ?? (descriptor.phase.command ? { kind: 'shell', command: descriptor.phase.command } : null)
+
+  let prompt = null
+  let phaseToRun = descriptor.phase
+  if (phaseRun?.kind === 'kiro') {
+    prompt = composeKiroPrompt(phaseRun.prompt, {
+      repoContext: inputs.repoContext,
+      linearContext: shouldInjectLinearContext(config, descriptor.phase.id) ? inputs.linearContext : '',
+      handoff: '',
+    })
+    phaseToRun = {
+      ...descriptor.phase,
+      run: {
+        ...phaseRun,
+        prompt,
+      },
+    }
+  }
+
+  const result = await runPhase(phaseToRun, {
+    cwd: config.repoDir,
+    env: {
+      ...env,
+      ZHUGE_TURN: String(state.turn),
+      ZHUGE_PROFILE: profileName,
+      ZHUGE_PHASE: descriptor.phase.id,
+      ZHUGE_REPO_CONTEXT: inputs.repoContext,
+      ZHUGE_REPO_CONTEXT_PATH: '',
+      ZHUGE_LINEAR_CONTEXT: inputs.linearContext,
+      ZHUGE_LINEAR_CONTEXT_PATH: '',
+      ZHUGE_HANDOFF: '',
+      ZHUGE_HANDOFF_PATH: '',
+    },
+    kiro: config.kiro,
+  })
+
+  if (result.code !== 0) {
+    return null
+  }
+
+  const snapshotAfter = await captureWorktreeSnapshot(config.repoDir, {
+    env,
+    ignorePaths: ignoredRepoPaths,
+  })
+  if (snapshotBefore && snapshotAfter && !sameWorktreeSnapshot(snapshotBefore, snapshotAfter)) {
+    console.warn(`[Turn ${state.turn}] Discarding strategist prefetch because worktree changed during prefetch`)
+    return null
+  }
+
+  return {
+    turn: state.turn,
+    profileName,
+    phaseId: descriptor.phase.id,
+    phaseIndex: descriptor.index,
+    repoContext: inputs.repoContext,
+    linearContext: inputs.linearContext,
+    linearTasks: Array.isArray(inputs.linearTasks) ? structuredClone(inputs.linearTasks) : inputs.linearTasks,
+    prompt,
+    result,
+    snapshot: snapshotAfter ?? snapshotBefore ?? null,
+  }
+}
+
+async function runTurn(config, state, turnDir, options = {}) {
   const profileName = nextProfileName(state, config.profileRotation)
   const profile = config.profiles[profileName]
   const turnStart = Date.now()
   const turnLabel = `Turn ${state.turn}`
+  const prefetchedStrategist =
+    options.prefetchedStrategist?.turn === state.turn &&
+    options.prefetchedStrategist?.profileName === profileName
+      ? options.prefetchedStrategist
+      : null
 
   if (config.repoPolicy?.pushBranch) {
     await ensureOnDeliveryBranch(config, {
@@ -87,18 +285,25 @@ async function runTurn(config, state, turnDir) {
     })
   }
 
-  const repoContext = await collectRepoContext(config, runCommand, {
+  const prefetchedInputs = prefetchedStrategist
+    ? {
+        repoContext: prefetchedStrategist.repoContext,
+        linearTasks: prefetchedStrategist.linearTasks,
+        linearContext: prefetchedStrategist.linearContext,
+      }
+    : null
+  const {
+    repoContext,
+    linearTasks: initialLinearTasks,
+    linearContext: initialLinearContext,
+  } = await loadTurnInputs(config, {
     env: process.env,
+    ...(prefetchedInputs ?? {}),
   })
   const repoContextPath = path.join(turnDir, 'repo-context.txt')
   await fs.writeFile(repoContextPath, repoContext, 'utf8')
-  let linearTasks = await queryLinearTasks(config, {
-    env: process.env,
-  })
-  let linearContext = buildLinearContext(
-    linearTasks,
-    Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
-  )
+  let linearTasks = initialLinearTasks
+  let linearContext = initialLinearContext
   const linearContextPath = path.join(turnDir, 'linear-context.txt')
   await fs.writeFile(linearContextPath, linearContext, 'utf8')
 
@@ -111,6 +316,7 @@ async function runTurn(config, state, turnDir) {
     linearContextPath,
     contextCommands: config.context?.commands ?? [],
     phases: profile.phases,
+    prefetchedStrategistUsed: Boolean(prefetchedStrategist),
   }
   await writeJson(path.join(turnDir, 'context.json'), context)
 
@@ -119,6 +325,12 @@ async function runTurn(config, state, turnDir) {
   let errorSummary = null
   let handoff = ''
   let activeTask = null
+  let reviewerAssessment = {
+    reliable: false,
+    lowRisk: false,
+    files: [],
+  }
+  const ignoredRepoPaths = internalRepoPaths(config)
   if (linearTasks && linearTasks.length > 0) {
     const seeded = linearTasks.find((task) => {
       const status = String(task.status ?? '').trim().toLowerCase()
@@ -154,41 +366,89 @@ async function runTurn(config, state, turnDir) {
     const handoffPath = path.join(turnDir, `${prefix}-${phase.id}.handoff.txt`)
     await fs.writeFile(handoffPath, handoff, 'utf8')
 
-    let promptPath = null
-    let phaseToRun = phase
-    if (phaseRun?.kind === 'kiro') {
-      const prompt = composeKiroPrompt(phaseRun.prompt, {
-        repoContext,
-        linearContext: shouldInjectLinearContext(config, phase.id) ? linearContext : '',
-        handoff,
-      })
-      promptPath = path.join(turnDir, `${prefix}-${phase.id}.prompt.txt`)
-      await fs.writeFile(promptPath, prompt, 'utf8')
-      phaseToRun = {
-        ...phase,
-        run: {
-          ...phaseRun,
-          prompt,
-        },
+    if (isReviewerPhase(phase.id)) {
+      const shouldSkip =
+        config.reviewerPolicy === 'skip' ||
+        (config.reviewerPolicy === 'risk-based' && reviewerAssessment.lowRisk)
+      if (shouldSkip) {
+        console.log(`[Turn ${state.turn}] Skipping reviewer (policy: ${config.reviewerPolicy})`)
+        phaseResults.push({
+          id: phase.id,
+          kind: phaseRun?.kind,
+          command: phaseRun?.kind === 'shell' ? phaseRun.command : undefined,
+          agent: phaseRun?.kind === 'kiro' ? phaseRun.agent : undefined,
+          code: 0,
+          timedOut: false,
+          durationMs: 0,
+          allowFailure: Boolean(phase.allowFailure),
+          skipped: true,
+          skipReason: config.reviewerPolicy,
+        })
+        await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stdout.log`), '', 'utf8')
+        await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stderr.log`), '', 'utf8')
+        continue
       }
     }
 
-    const result = await runPhase(phaseToRun, {
-      cwd: config.repoDir,
-      env: {
-        ...process.env,
-        ZHUGE_TURN: String(state.turn),
-        ZHUGE_PROFILE: profileName,
-        ZHUGE_PHASE: phase.id,
-        ZHUGE_REPO_CONTEXT: repoContext,
-        ZHUGE_REPO_CONTEXT_PATH: repoContextPath,
-        ZHUGE_LINEAR_CONTEXT: linearContext,
-        ZHUGE_LINEAR_CONTEXT_PATH: linearContextPath,
-        ZHUGE_HANDOFF: handoff,
-        ZHUGE_HANDOFF_PATH: handoffPath,
-      },
-      kiro: config.kiro,
-    })
+    const usePrefetchedStrategist =
+      prefetchedStrategist &&
+      prefetchedStrategist.phaseIndex === index &&
+      prefetchedStrategist.phaseId === phase.id
+
+    let promptPath = null
+    let phaseToRun = phase
+    let result = null
+    if (usePrefetchedStrategist) {
+      if (prefetchedStrategist.prompt != null) {
+        promptPath = path.join(turnDir, `${prefix}-${phase.id}.prompt.txt`)
+        await fs.writeFile(promptPath, prefetchedStrategist.prompt, 'utf8')
+      }
+      result = prefetchedStrategist.result
+    } else {
+      if (phaseRun?.kind === 'kiro') {
+        const prompt = composeKiroPrompt(phaseRun.prompt, {
+          repoContext,
+          linearContext: shouldInjectLinearContext(config, phase.id) ? linearContext : '',
+          handoff,
+        })
+        promptPath = path.join(turnDir, `${prefix}-${phase.id}.prompt.txt`)
+        await fs.writeFile(promptPath, prompt, 'utf8')
+        phaseToRun = {
+          ...phase,
+          run: {
+            ...phaseRun,
+            prompt,
+          },
+        }
+      }
+    }
+
+    const executorSnapshot =
+      config.reviewerPolicy === 'risk-based' && isExecutorPhase(phase.id)
+        ? await captureWorktreeSnapshot(config.repoDir, {
+            env: process.env,
+            ignorePaths: ignoredRepoPaths,
+          })
+        : null
+
+    if (!result) {
+      result = await runPhase(phaseToRun, {
+        cwd: config.repoDir,
+        env: {
+          ...process.env,
+          ZHUGE_TURN: String(state.turn),
+          ZHUGE_PROFILE: profileName,
+          ZHUGE_PHASE: phase.id,
+          ZHUGE_REPO_CONTEXT: repoContext,
+          ZHUGE_REPO_CONTEXT_PATH: repoContextPath,
+          ZHUGE_LINEAR_CONTEXT: linearContext,
+          ZHUGE_LINEAR_CONTEXT_PATH: linearContextPath,
+          ZHUGE_HANDOFF: handoff,
+          ZHUGE_HANDOFF_PATH: handoffPath,
+        },
+        kiro: config.kiro,
+      })
+    }
 
     const phaseResult = {
       id: phase.id,
@@ -201,6 +461,7 @@ async function runTurn(config, state, turnDir) {
       allowFailure: Boolean(phase.allowFailure),
       adapterUsed: result.adapterUsed,
       fallbackUsed: result.fallbackUsed,
+      prefetched: Boolean(usePrefetchedStrategist),
     }
 
     const markers = parseLinearMarkers(result.out)
@@ -251,6 +512,13 @@ async function runTurn(config, state, turnDir) {
 
     handoff = truncateHandoff(result.out)
 
+    if (config.reviewerPolicy === 'risk-based' && isExecutorPhase(phase.id) && result.code === 0) {
+      reviewerAssessment = await assessReviewerRisk(config, executorSnapshot, {
+        env: process.env,
+        ignorePaths: ignoredRepoPaths,
+      })
+    }
+
     if (result.code === 0) {
       const commitResult = await commitWorkingTreeIfDirty(config, {
         env: process.env,
@@ -295,12 +563,15 @@ async function runTurn(config, state, turnDir) {
 
 export async function runLoop(config, options = {}) {
   const once = Boolean(options.once)
+  const pipelineEnabled = isPipelineEnabled(config)
+  const ignoredRepoPaths = internalRepoPaths(config)
 
   await mkdirp(config.runtimeDir)
   await mkdirp(config.logsDir)
 
-  const lock = await acquireLock(config.lockPath)
+  let lock = await acquireLock(config.lockPath)
   let stopRequested = false
+  let prefetchedStrategist = null
 
   const onSignal = () => {
     stopRequested = true
@@ -313,13 +584,36 @@ export async function runLoop(config, options = {}) {
     let state = await loadState(config.statePath)
 
     while (true) {
+      state = await loadState(config.statePath)
+      let turnPrefetch = null
+      if (pipelineEnabled && prefetchedStrategist?.turn === state.turn) {
+        const currentSnapshot = await captureWorktreeSnapshot(config.repoDir, {
+          env: process.env,
+          ignorePaths: ignoredRepoPaths,
+        })
+        const canUsePrefetch =
+          prefetchedStrategist.snapshot == null ||
+          sameWorktreeSnapshot(prefetchedStrategist.snapshot, currentSnapshot)
+
+        if (canUsePrefetch) {
+          turnPrefetch = prefetchedStrategist
+        } else {
+          console.log(`[Turn ${state.turn}] Discarding stale strategist prefetch`)
+        }
+        prefetchedStrategist = null
+      } else if (prefetchedStrategist && prefetchedStrategist.turn !== state.turn) {
+        prefetchedStrategist = null
+      }
+
       const turnDir = path.join(
         config.logsDir,
         `turn-${String(state.turn).padStart(6, '0')}-${timestampForPath(nowIso())}`
       )
       await mkdirp(turnDir)
 
-      const turnResult = await runTurn(config, state, turnDir)
+      const turnResult = await runTurn(config, state, turnDir, {
+        prefetchedStrategist: turnPrefetch,
+      })
       state = recordTurnResult(state, turnResult, config.keepRecentTurns)
       await saveState(config.statePath, state)
       await cleanOldTurnLogs(config.logsDir, config.keepRecentTurns)
@@ -343,11 +637,33 @@ export async function runLoop(config, options = {}) {
         return { exitCode: 0, state }
       }
 
+      if (pipelineEnabled) {
+        await releaseLock(lock)
+        lock = null
+        try {
+          prefetchedStrategist = await prefetchStrategistPhase(config, state, {
+            env: process.env,
+            ignorePaths: ignoredRepoPaths,
+          })
+        } catch (error) {
+          prefetchedStrategist = null
+          console.warn(`[Turn ${state.turn}] Strategist prefetch failed: ${error?.message ?? String(error)}`)
+        }
+
+        if (stopRequested) {
+          return { exitCode: 0, state }
+        }
+
+        lock = await acquireLock(config.lockPath)
+      }
+
       await sleep(config.sleepMs)
     }
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
-    await releaseLock(lock)
+    if (lock) {
+      await releaseLock(lock)
+    }
   }
 }
