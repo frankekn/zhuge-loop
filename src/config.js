@@ -387,44 +387,18 @@ export async function loadConfig(configPath = path.resolve(process.cwd(), 'zhuge
   return normalizeConfig(raw, configPath)
 }
 
-export async function writeSampleConfig(configPath = path.resolve(process.cwd(), 'zhuge.config.json')) {
-  const sample = {
-    ...DEFAULT_CONFIG,
-    profiles: {
-      default: {
-        description: 'Plan -> implement -> verify in small slices',
-        phases: [
-          {
-            id: 'plan',
-            run: {
-              kind: 'shell',
-              command: 'echo "[plan] choose the smallest shippable slice"',
-            },
-            timeoutMs: 600000,
-            allowFailure: false,
-          },
-          {
-            id: 'implement',
-            run: {
-              kind: 'shell',
-              command: 'echo "[implement] run your agent or script here"',
-            },
-            timeoutMs: 1200000,
-            allowFailure: false,
-          },
-          {
-            id: 'verify',
-            run: {
-              kind: 'shell',
-              command: 'npm test',
-            },
-            timeoutMs: 900000,
-            allowFailure: false,
-          },
-        ],
-      },
-    },
+export async function writeSampleConfig(
+  configPath = path.resolve(process.cwd(), 'zhuge.config.json'),
+  presetName
+) {
+  const preset = presetName ? PRESETS[presetName] : null
+  if (presetName && !preset) {
+    throw new Error(`Unknown preset: ${presetName}. Available: ${Object.keys(PRESETS).join(', ')}`)
   }
+
+  const sample = preset
+    ? structuredClone(preset)
+    : structuredClone(PRESETS['zhuge-solo'])
 
   await fs.writeFile(configPath, `${JSON.stringify(sample, null, 2)}\n`, 'utf8')
 }

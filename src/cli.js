@@ -84,6 +84,14 @@ function quoteForShell(input) {
   return `'${String(input).replace(/'/g, `'"'"'`)}'`
 }
 
+function createCheck(label, ok, detail, strict = false) {
+  return {
+    label,
+    status: ok ? 'OK' : (strict ? 'FAIL' : 'MISSING'),
+    detail,
+  }
+}
+
 async function assertConfigCanBeCreated(configPath, force) {
   if (force) return
 
@@ -203,12 +211,7 @@ async function runDoctor(config, strict) {
       timeoutMs: 3000,
     })
 
-    checks.push({
-      profile: 'context',
-      phase: command.name,
-      command: token,
-      ok: probe.code === 0,
-    })
+    checks.push(createCheck(`context/${command.name}`, probe.code === 0, token, strict))
   }
 
   if (strict) {
@@ -273,12 +276,7 @@ async function runDoctor(config, strict) {
         timeoutMs: 3000,
       })
 
-      checks.push({
-        profile: 'kiro',
-        phase: name,
-        command: token,
-        ok: probe.code === 0,
-      })
+      checks.push(createCheck(`kiro/${name}`, probe.code === 0, token, strict))
     }
   }
 
@@ -289,12 +287,7 @@ async function runDoctor(config, strict) {
       timeoutMs: 3000,
     })
 
-    checks.push({
-      profile: 'linear',
-      phase: 'cli',
-      command: token,
-      ok: probe.code === 0,
-    })
+    checks.push(createCheck('linear/cli', probe.code === 0, token, strict))
   }
 
   if (config.repoPolicy?.pushBranch) {
@@ -303,12 +296,7 @@ async function runDoctor(config, strict) {
       timeoutMs: 3000,
     })
 
-    checks.push({
-      profile: 'repo',
-      phase: 'git',
-      command: 'git',
-      ok: probe.code === 0,
-    })
+    checks.push(createCheck('repo/git', probe.code === 0, 'git', strict))
   }
 
   console.log('Doctor summary:')
@@ -318,7 +306,7 @@ async function runDoctor(config, strict) {
   console.log('')
 
   for (const item of checks) {
-    const detail = item.detail ? ` (${item.detail})` : ''
+    const detail = item.detail ? `: ${item.detail}` : ''
     console.log(`  [${item.status}] ${item.label}${detail}`)
   }
 
