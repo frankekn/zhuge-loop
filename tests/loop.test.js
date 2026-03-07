@@ -285,7 +285,7 @@ test('runLoop --once completes one successful turn', async () => {
 
 test('runLoop --once returns non-zero when turn fails', async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-once-fail-'))
-  const config = buildConfig(repoDir, `node -e "process.exit(7)"`)
+  const config = buildLoopConfig(repoDir, [buildShellPhase('phase', `node -e "process.exit(7)"`)])
 
   const result = await runLoop(config, { once: true })
   assert.equal(result.exitCode, 2)
@@ -577,6 +577,76 @@ test('runLoop processes linear markers and auto-commits/pushes to delivery branc
     assert.equal(result.state.results[0].phases[0].pushedBranch, 'agent-dev')
     assert.equal(result.state.results[0].phases[1].commitSubject, 'AIR-580: sync reviewer changes')
     assert.equal(result.state.results[0].phases[1].pushedBranch, 'agent-dev')
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
+})
+
+test('runLoop carries activeTask across later phases without new linear markers', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-active-task-carry-'))
+  const issueId = '33333333-3333-4333-8333-333333333333'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: issueId,
+      identifier: 'AIR-581',
+      title: 'Carry active task across executor and reviewer',
+      status: 'Todo',
+      priority: 'P1',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'strategist',
+          `node -e "console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+        ),
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n')"`
+        ),
+        buildShellPhase(
+          'reviewer',
+          `node -e "const fs=require('fs'); fs.appendFileSync('feature.txt','reviewer\\n')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['strategist'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+
+    const headSubject = await runLocalCommand('git log -1 --pretty=%s', repoDir)
+    const previousSubject = await runLocalCommand('git log -1 --skip=1 --pretty=%s', repoDir)
+
+    assert.equal(result.state.results[0].phases[0].commitSubject, 'AIR-581: sync strategist changes')
+    assert.equal(result.state.results[0].phases[1].commitSubject, 'AIR-581: sync executor changes')
+    assert.equal(result.state.results[0].phases[2].commitSubject, 'AIR-581: sync reviewer changes')
+    assert.equal(headSubject, 'AIR-581: sync reviewer changes')
+    assert.equal(previousSubject, 'AIR-581: sync executor changes')
   } finally {
     if (previousApiKey == null) delete process.env.LINEAR_API_KEY
     else process.env.LINEAR_API_KEY = previousApiKey

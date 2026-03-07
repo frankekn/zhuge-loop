@@ -8,7 +8,15 @@ function normalizeTaskStatus(status) {
 }
 
 function filterActiveLinearTasks(tasks) {
-  const keepStatuses = new Set(['todo', 'in progress', 'backlog', 'triage'])
+  const keepStatuses = new Set([
+    'todo',
+    'in progress',
+    'backlog',
+    'triage',
+    'coordinating',
+    'executing',
+    'in review',
+  ])
   return (tasks || []).filter((task) => keepStatuses.has(normalizeTaskStatus(task?.status)))
 }
 

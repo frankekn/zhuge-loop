@@ -197,6 +197,7 @@ async function runTurn(config, state, turnDir) {
     }
 
     const markers = parseLinearMarkers(result.out)
+    const activeMarker = markers.find((marker) => marker.type === 'active')
     if (markers.length > 0) {
       phaseResult.linearMarkers = markers
       await processLinearMarkers(config, markers, phase.id, linearTasks ?? [], {
@@ -210,15 +211,8 @@ async function runTurn(config, state, turnDir) {
         Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
       )
       await fs.writeFile(linearContextPath, linearContext, 'utf8')
-
-      const resolvedActiveTask = resolveActiveTask(
-        markers.find((marker) => marker.type === 'active'),
-        linearTasks
-      )
-      if (resolvedActiveTask) {
-        activeTask = resolvedActiveTask
-      }
     }
+    activeTask = resolveActiveTask(activeMarker, linearTasks) ?? activeTask
 
     phaseResults.push(phaseResult)
 
