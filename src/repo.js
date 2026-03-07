@@ -177,6 +177,10 @@ function formatAutoCommitMessage(ctx = {}) {
 
   const title = compactOneLine(ctx.activeTask?.title, 48)
   if (title) {
+    const keyMatch = title.match(/([A-Z]+-\d+)/)
+    if (keyMatch) {
+      return `${keyMatch[1]}: sync ${phaseId} changes`
+    }
     return `chore: sync ${phaseId} changes for ${title}`
   }
 

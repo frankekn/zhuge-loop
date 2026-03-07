@@ -352,9 +352,12 @@ async function runTurn(config, state, turnDir, options = {}) {
     }
     if (marker.title) {
       const normalized = String(marker.title).trim().toLowerCase()
-      return tasks?.find((task) => String(task.title ?? '').trim().toLowerCase() === normalized) ?? {
-        title: String(marker.title).trim(),
-      }
+      const found = tasks?.find((task) => String(task.title ?? '').trim().toLowerCase() === normalized)
+      if (found) return found
+      const fallback = { title: String(marker.title).trim() }
+      const keyMatch = fallback.title.match(/([A-Z]+-\d+)/)
+      if (keyMatch) fallback.identifier = keyMatch[1]
+      return fallback
     }
     return null
   }

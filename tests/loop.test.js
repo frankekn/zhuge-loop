@@ -959,3 +959,65 @@ test('runLoop seeds activeTask from executing linear tasks at turn start', async
     else process.env.LINEAR_API_KEY = previousApiKey
   }
 })
+
+test('resolveActiveTask extracts identifier from title when linearTasks has no match', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-title-id-'))
+  await initGitRepoWithRemote(repoDir)
+  // Create a fake Linear CLI with tasks that do NOT match the title in the marker
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: '55555555-5555-5555-8555-555555555555',
+      identifier: 'AIR-100',
+      title: 'Unrelated task',
+      status: 'Todo',
+      priority: 'P2',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        // Strategist outputs a title-based marker with an issue key embedded
+        // but linearTasks won't have a matching title → fallback path
+        buildShellPhase(
+          'strategist',
+          `node -e "console.log('[LINEAR_ACTIVE] title=AIR-769: Dashboard top-bar redesign')"`
+        ),
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.writeFileSync('dashboard.txt','work\\n')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['strategist'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+
+    // The executor commit must use AIR-769 extracted from the title fallback
+    assert.equal(result.state.results[0].phases[1].commitSubject, 'AIR-769: sync executor changes')
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
+})
