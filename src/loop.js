@@ -6,6 +6,7 @@ import {
   buildLinearContext,
   parseLinearMarkers,
   processLinearMarkers,
+  queryLinearIssueById,
   queryLinearTasks,
   shouldInjectLinearContext,
 } from './linear.js'
@@ -331,29 +332,46 @@ async function runTurn(config, state, turnDir, options = {}) {
     files: [],
   }
   const ignoredRepoPaths = internalRepoPaths(config)
+  const linearTaskCache = new Map()
+  const rememberLinearTask = (task) => {
+    if (!task?.id) return task
+    linearTaskCache.set(task.id, task)
+    return task
+  }
+  const rememberLinearTasks = (tasks) => {
+    for (const task of tasks ?? []) rememberLinearTask(task)
+  }
+  rememberLinearTasks(linearTasks)
   if (linearTasks && linearTasks.length > 0) {
     const seeded = linearTasks.find((task) => {
       const status = String(task.status ?? '').trim().toLowerCase()
       return status === 'executing' || status === 'in review'
     })
-    if (seeded) activeTask = seeded
+    if (seeded) activeTask = rememberLinearTask(seeded)
   }
 
-  const resolveActiveTask = (marker, tasks) => {
+  const resolveActiveTask = async (marker, tasks) => {
     if (!marker) return null
+    rememberLinearTasks(tasks)
     if (marker.issueId) {
-      return tasks?.find((task) => task.id === marker.issueId) ?? { id: marker.issueId }
+      const normalizedIssueId = String(marker.issueId).trim()
+      const cached = linearTaskCache.get(normalizedIssueId)
+      if (cached) return cached
+      const fetched = await queryLinearIssueById(config, normalizedIssueId, {
+        env: process.env,
+      })
+      if (fetched) return rememberLinearTask(fetched)
+      return { id: normalizedIssueId }
     }
     if (marker.identifier) {
       const normalized = String(marker.identifier).trim().toUpperCase()
-      return tasks?.find((task) => String(task.identifier ?? '').trim().toUpperCase() === normalized) ?? {
-        identifier: normalized,
-      }
+      const found = tasks?.find((task) => String(task.identifier ?? '').trim().toUpperCase() === normalized)
+      return found ? rememberLinearTask(found) : { identifier: normalized }
     }
     if (marker.title) {
       const normalized = String(marker.title).trim().toLowerCase()
       const found = tasks?.find((task) => String(task.title ?? '').trim().toLowerCase() === normalized)
-      if (found) return found
+      if (found) return rememberLinearTask(found)
       const fallback = { title: String(marker.title).trim() }
       const keyMatch = fallback.title.match(/([A-Z]+-\d+)/)
       if (keyMatch) fallback.identifier = keyMatch[1]
@@ -477,13 +495,14 @@ async function runTurn(config, state, turnDir, options = {}) {
       linearTasks = (await queryLinearTasks(config, {
         env: process.env,
       })) ?? linearTasks
+      rememberLinearTasks(linearTasks)
       linearContext = buildLinearContext(
         linearTasks,
         Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
       )
       await fs.writeFile(linearContextPath, linearContext, 'utf8')
     }
-    activeTask = resolveActiveTask(activeMarker, linearTasks) ?? activeTask
+    activeTask = await resolveActiveTask(activeMarker, linearTasks) ?? activeTask
 
     phaseResults.push(phaseResult)
 

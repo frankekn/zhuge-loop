@@ -2,6 +2,18 @@ import { spawn } from 'node:child_process'
 import { resolve as resolvePath } from 'node:path'
 
 export const DEFAULT_LINEAR_PROMPT_PHASE_IDS = ['strategist', 'coordinator']
+const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql'
+
+function resolveLinearApiKey(config, options = {}) {
+  const env = options.env ?? process.env
+  const envApiKey = String(env.LINEAR_API_KEY ?? process.env.LINEAR_API_KEY ?? '').trim()
+  const configApiKey = String(config?.integrations?.linear?.apiKey ?? '').trim()
+  return envApiKey || configApiKey
+}
+
+function hasLinearAuth(config, options = {}) {
+  return Boolean(resolveLinearApiKey(config, options))
+}
 
 function normalizeTaskStatus(status) {
   return String(status ?? '').trim().toLowerCase()
@@ -22,6 +34,23 @@ function filterActiveLinearTasks(tasks) {
 
 function normalizeTitle(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function normalizeLinearIssue(issue) {
+  if (!issue || typeof issue !== 'object') return null
+
+  const id = String(issue.id ?? '').trim()
+  const title = String(issue.title ?? '').trim()
+  if (!id || !title) return null
+
+  const identifier = String(issue.identifier ?? '').trim()
+  return {
+    id,
+    identifier: identifier || undefined,
+    title,
+    status: String(issue.state?.name ?? issue.status ?? 'unknown'),
+    priority: String(issue.priorityLabel ?? issue.priority ?? 'unset'),
+  }
 }
 
 function tryParseJsonObject(raw) {
@@ -195,7 +224,7 @@ export function parseLinearMarkers(text) {
 
 export async function queryLinearTasks(config, options = {}) {
   if (!config.integrations?.linear?.enabled) return null
-  if (!options.env?.LINEAR_API_KEY && !process.env.LINEAR_API_KEY) return null
+  if (!hasLinearAuth(config, options)) return null
 
   try {
     const output = await runLinearCli(config, ['query-tasks'], options)
@@ -210,7 +239,7 @@ export async function queryLinearTasks(config, options = {}) {
 
 export async function processLinearMarkers(config, markers, phaseId, openTasks = [], options = {}) {
   if (!config.integrations?.linear?.enabled) return { processed: false, count: 0 }
-  if (!options.env?.LINEAR_API_KEY && !process.env.LINEAR_API_KEY) return { processed: false, count: 0 }
+  if (!hasLinearAuth(config, options)) return { processed: false, count: 0 }
 
   const titleToId = new Map()
   const identifierToId = new Map()
@@ -255,6 +284,64 @@ export async function processLinearMarkers(config, markers, phaseId, openTasks =
   }
 
   return { processed: count > 0, count }
+}
+
+export async function queryLinearIssueById(config, issueId, options = {}) {
+  if (!config.integrations?.linear?.enabled) return null
+
+  const normalizedIssueId = String(issueId ?? '').trim()
+  if (!normalizedIssueId) return null
+
+  const apiKey = resolveLinearApiKey(config, options)
+  if (!apiKey) return null
+
+  const fetchImpl = options.fetch ?? globalThis.fetch
+  if (typeof fetchImpl !== 'function') return null
+
+  try {
+    const response = await fetchImpl(LINEAR_GRAPHQL_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: apiKey,
+      },
+      body: JSON.stringify({
+        query: `
+          query ZhugeLoopIssue($id: String!) {
+            issue(id: $id) {
+              id
+              identifier
+              title
+              priority
+              state {
+                name
+              }
+            }
+          }
+        `,
+        variables: {
+          id: normalizedIssueId,
+        },
+      }),
+    })
+
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) {
+      const errorMessage =
+        payload?.errors?.map((entry) => entry?.message).filter(Boolean).join('; ') ||
+        `HTTP ${response.status}`
+      throw new Error(errorMessage)
+    }
+
+    if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+      throw new Error(payload.errors.map((entry) => entry?.message).filter(Boolean).join('; '))
+    }
+
+    return normalizeLinearIssue(payload?.data?.issue)
+  } catch (error) {
+    console.warn(`[Linear] issue lookup failed for ${normalizedIssueId}: ${error?.message ?? String(error)}`)
+    return null
+  }
 }
 
 export async function runLinearCli(config, args, options = {}) {

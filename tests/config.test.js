@@ -179,6 +179,7 @@ test('normalizeConfig resolves repo policy and linear integration paths', () => 
         linear: {
           enabled: true,
           cliPath: './tools/linear-cli.sh',
+          apiKey: ' linear-token ',
           promptPhaseIds: ['strategist', 'reviewer'],
           maxTasks: 12,
           contextMaxChars: 5000,
@@ -199,6 +200,7 @@ test('normalizeConfig resolves repo policy and linear integration paths', () => 
   assert.equal(config.repoPolicy.autoPushAfterEachPhase, true)
   assert.equal(config.integrations.linear.enabled, true)
   assert.equal(config.integrations.linear.cliPath, '/tmp/example/repo/tools/linear-cli.sh')
+  assert.equal(config.integrations.linear.apiKey, 'linear-token')
   assert.deepEqual(config.integrations.linear.promptPhaseIds, ['strategist', 'reviewer'])
 })
 

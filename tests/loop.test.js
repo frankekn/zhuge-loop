@@ -960,6 +960,92 @@ test('runLoop seeds activeTask from executing linear tasks at turn start', async
   }
 })
 
+test('runLoop resolves activeTask identifier for done issues missing from queryLinearTasks', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-done-active-task-'))
+  const issueId = '66666666-6666-4666-8666-666666666666'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: '77777777-7777-4777-8777-777777777777',
+      identifier: 'AIR-100',
+      title: 'Unrelated open task',
+      status: 'Todo',
+      priority: 'P2',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  const previousFetch = globalThis.fetch
+  let fetchCount = 0
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+  globalThis.fetch = async (url, init = {}) => {
+    fetchCount += 1
+    assert.equal(url, 'https://api.linear.app/graphql')
+    assert.equal(init.method, 'POST')
+    assert.equal(init.headers?.Authorization, 'test-linear-key')
+
+    const payload = JSON.parse(String(init.body ?? '{}'))
+    assert.equal(payload.variables?.id, issueId)
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          issue: {
+            id: issueId,
+            identifier: 'AIR-990',
+            title: 'Done issue missing from query-tasks results',
+            priority: 1,
+            state: { name: 'Done' },
+          },
+        },
+      }),
+    }
+  }
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'strategist',
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','strategist\\n'); console.log('[LINEAR_ACTIVE] issue_id=${issueId}'); console.log('[LINEAR_DONE] issue_id=${issueId}')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['strategist'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.state.results[0].phases[0].commitSubject, 'AIR-990: sync strategist changes')
+    assert.equal(fetchCount, 1)
+
+    const headSubject = await runLocalCommand('git log -1 --pretty=%s', repoDir)
+    assert.equal(headSubject, 'AIR-990: sync strategist changes')
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('resolveActiveTask extracts identifier from title when linearTasks has no match', async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-title-id-'))
   await initGitRepoWithRemote(repoDir)

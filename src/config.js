@@ -102,6 +102,7 @@ const DEFAULT_CONFIG = {
     linear: {
       enabled: false,
       cliPath: './tools/linear-cli.sh',
+      apiKey: '',
       promptPhaseIds: DEFAULT_LINEAR_PROMPT_PHASE_IDS,
       maxTasks: 10,
       contextMaxChars: 4_000,
@@ -263,6 +264,9 @@ function normalizeLinearIntegration(linear, repoDir) {
   assertNonEmptyString(merged.cliPath, 'integrations.linear.cliPath')
   assertPositiveInteger(Number(merged.maxTasks), 'integrations.linear.maxTasks')
   assertPositiveInteger(Number(merged.contextMaxChars), 'integrations.linear.contextMaxChars')
+  if (merged.apiKey != null && String(merged.apiKey).trim().length > 0) {
+    assertNonEmptyString(merged.apiKey, 'integrations.linear.apiKey')
+  }
 
   if (!Array.isArray(merged.promptPhaseIds)) {
     throw new Error('integrations.linear.promptPhaseIds must be an array')
@@ -276,6 +280,7 @@ function normalizeLinearIntegration(linear, repoDir) {
   return {
     enabled: Boolean(merged.enabled),
     cliPath: resolveFrom(repoDir, merged.cliPath),
+    apiKey: String(merged.apiKey ?? '').trim(),
     promptPhaseIds,
     maxTasks: Number(merged.maxTasks),
     contextMaxChars: Number(merged.contextMaxChars),
