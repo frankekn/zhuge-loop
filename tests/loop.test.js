@@ -652,3 +652,73 @@ test('runLoop carries activeTask across later phases without new linear markers'
     else process.env.LINEAR_API_KEY = previousApiKey
   }
 })
+
+test('runLoop seeds activeTask from executing linear tasks at turn start', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-active-task-seed-'))
+  const issueId = '44444444-4444-4444-8444-444444444444'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: issueId,
+      identifier: 'AIR-737',
+      title: 'Seed active task at turn start',
+      status: 'Executing',
+      priority: 'P1',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'strategist',
+          `node -e "console.log('no marker from strategist')"`
+        ),
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n')"`
+        ),
+        buildShellPhase(
+          'reviewer',
+          `node -e "const fs=require('fs'); fs.appendFileSync('feature.txt','reviewer\\n'); console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['strategist'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+
+    const headSubject = await runLocalCommand('git log -1 --pretty=%s', repoDir)
+    const previousSubject = await runLocalCommand('git log -1 --skip=1 --pretty=%s', repoDir)
+
+    assert.equal(result.state.results[0].phases[0].commitSubject, 'AIR-737: sync strategist changes')
+    assert.equal(result.state.results[0].phases[1].commitSubject, 'AIR-737: sync executor changes')
+    assert.equal(result.state.results[0].phases[2].commitSubject, 'AIR-737: sync reviewer changes')
+    assert.equal(headSubject, 'AIR-737: sync reviewer changes')
+    assert.equal(previousSubject, 'AIR-737: sync executor changes')
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
+})

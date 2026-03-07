@@ -119,6 +119,13 @@ async function runTurn(config, state, turnDir) {
   let errorSummary = null
   let handoff = ''
   let activeTask = null
+  if (linearTasks && linearTasks.length > 0) {
+    const seeded = linearTasks.find((task) => {
+      const status = String(task.status ?? '').trim().toLowerCase()
+      return status === 'executing' || status === 'in review'
+    })
+    if (seeded) activeTask = seeded
+  }
 
   const resolveActiveTask = (marker, tasks) => {
     if (!marker) return null
