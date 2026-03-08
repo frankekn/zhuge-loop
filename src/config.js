@@ -319,6 +319,10 @@ function normalizePhase(profileName, phase, index) {
         kind: 'shell',
         command: phase.run.command.trim(),
       }
+    } else if (kind === 'vitestChanged') {
+      run = {
+        kind: 'vitestChanged',
+      }
     } else if (kind === 'kiro') {
       assertNonEmptyString(phase.run.agent, `${phasePath}.run.agent`)
       assertNonEmptyString(phase.run.prompt, `${phasePath}.run.prompt`)
@@ -328,7 +332,7 @@ function normalizePhase(profileName, phase, index) {
         prompt: phase.run.prompt,
       }
     } else {
-      throw new Error(`${phasePath}.run.kind must be "shell" or "kiro"`)
+      throw new Error(`${phasePath}.run.kind must be "shell", "vitestChanged", or "kiro"`)
     }
   } else {
     assertNonEmptyString(phase.command, `${phasePath}.command`)

@@ -33,6 +33,20 @@ test('parseLinearMarkers accepts done markers by issue_id, identifier, and title
   ])
 })
 
+test('parseLinearMarkers preserves mixed marker order', () => {
+  const markers = parseLinearMarkers(`
+[LINEAR_NEW_TASK] {"title":"First task","status":"Todo"}
+[LINEAR_ACTIVE] title=First task
+[LINEAR_DONE] title=First task
+`)
+
+  assert.deepEqual(markers, [
+    { type: 'new_task', payload: { title: 'First task', status: 'Todo' } },
+    { type: 'active', title: 'First task' },
+    { type: 'done', title: 'First task' },
+  ])
+})
+
 test('buildLinearContext keeps workflow statuses visible as active tasks', () => {
   const context = buildLinearContext([
     {

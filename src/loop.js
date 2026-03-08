@@ -6,8 +6,9 @@ import {
   buildLinearContext,
   parseLinearMarkers,
   processLinearMarkers,
-  queryLinearIssueById,
   queryLinearTasks,
+  resolveLinearTaskReference,
+  normalizeTitle as normalizeLinearTitle,
   shouldInjectLinearContext,
 } from './linear.js'
 import {
@@ -162,6 +163,254 @@ function isPipelineEnabled(config) {
   return config.pipeline === true || Boolean(config.pipeline?.enabled)
 }
 
+function normalizeLinearIdentifier(value) {
+  return String(value ?? '').trim().toUpperCase()
+}
+
+function summarizeTaskRef(task) {
+  if (!task) return null
+  return {
+    id: String(task.id ?? '').trim() || undefined,
+    identifier: normalizeLinearIdentifier(task.identifier) || undefined,
+    title: String(task.title ?? '').trim() || undefined,
+    status: String(task.status ?? '').trim() || undefined,
+    priority: String(task.priority ?? '').trim() || undefined,
+  }
+}
+
+function isTaskDone(task) {
+  return String(task?.status ?? '').trim().toLowerCase() === 'done'
+}
+
+function tasksMatch(left, right) {
+  if (!left || !right) return false
+
+  const leftId = String(left.id ?? '').trim()
+  const rightId = String(right.id ?? '').trim()
+  if (leftId && rightId && leftId === rightId) return true
+
+  const leftIdentifier = normalizeLinearIdentifier(left.identifier)
+  const rightIdentifier = normalizeLinearIdentifier(right.identifier)
+  if (leftIdentifier && rightIdentifier && leftIdentifier === rightIdentifier) return true
+
+  const leftTitle = normalizeLinearTitle(left.title)
+  const rightTitle = normalizeLinearTitle(right.title)
+  return Boolean(leftTitle && rightTitle && leftTitle === rightTitle)
+}
+
+function canBindCanonicalTask(phaseId) {
+  const normalized = String(phaseId ?? '').trim().toLowerCase()
+  return normalized === 'strategist' || normalized === 'executor'
+}
+
+function hasReviewerValidationFailure(result) {
+  const stderr = String(result?.err ?? '')
+  return (
+    /tool validation failed/i.test(stderr) ||
+    /path does not exist/i.test(stderr) ||
+    /required input/i.test(stderr)
+  )
+}
+
+async function listRepoFiles(repoDir) {
+  const result = await runCommand('command -v rg >/dev/null 2>&1 && rg --files || git ls-files', {
+    cwd: repoDir,
+    timeoutMs: 30_000,
+  })
+
+  if (result.code !== 0) {
+    return []
+  }
+
+  return String(result.out ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function escapeShellArg(value) {
+  return JSON.stringify(String(value))
+}
+
+function isVitestFile(filePath) {
+  return /(^|\/)(__tests__\/.*|[^/]+\.(test|spec)\.[^/]+)$/.test(String(filePath ?? ''))
+}
+
+function isLikelySourceFile(filePath) {
+  return /\.(?:[cm]?[jt]sx?|vue)$/.test(String(filePath ?? ''))
+}
+
+function basenameWithoutCompoundExt(filePath) {
+  const name = path.basename(String(filePath ?? ''))
+  return name.replace(/\.(test|spec)\.[^.]+$/i, '').replace(/\.[^.]+$/i, '')
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values.filter(Boolean))].sort()
+}
+
+function resolveVitestTargetsForChanges(changedFiles, repoFiles) {
+  const testFiles = repoFiles.filter((filePath) => isVitestFile(filePath))
+  const repoFileSet = new Set(repoFiles)
+  const selected = new Set()
+
+  for (const filePath of changedFiles) {
+    if (isVitestFile(filePath) && repoFileSet.has(filePath)) {
+      selected.add(filePath)
+      continue
+    }
+
+    if (!isLikelySourceFile(filePath)) continue
+
+    const directory = path.posix.dirname(filePath)
+    const base = basenameWithoutCompoundExt(filePath)
+    const localMatches = testFiles.filter((candidate) => {
+      const candidateDir = path.posix.dirname(candidate)
+      const candidateBase = basenameWithoutCompoundExt(candidate)
+      return candidateDir === directory && candidateBase === base
+    })
+    for (const match of localMatches) selected.add(match)
+
+    const directoryGuardrails = testFiles.filter((candidate) => {
+      if (path.posix.dirname(candidate) !== directory) return false
+      return /(guardrail|wiring)/i.test(path.posix.basename(candidate))
+    })
+    for (const match of directoryGuardrails) selected.add(match)
+  }
+
+  if (changedFiles.some((filePath) => /(^|\/)src\/(?:linear|loop)\.js$/.test(filePath))) {
+    for (const candidate of ['tests/linear.test.js', 'tests/loop.test.js']) {
+      if (repoFileSet.has(candidate)) selected.add(candidate)
+    }
+  }
+
+  return uniqueSorted([...selected])
+}
+
+async function buildVitestChangedCommand(config, snapshot, ignoredRepoPaths = []) {
+  const changeSet = await listFilesChangedSinceSnapshot(config.repoDir, snapshot, {
+    env: process.env,
+    ignorePaths: ignoredRepoPaths,
+  })
+
+  if (!changeSet.reliable) {
+    return {
+      ok: false,
+      error: 'unable_to_resolve_changed_files',
+      changedFiles: [],
+      resolvedTests: [],
+    }
+  }
+
+  const repoFiles = await listRepoFiles(config.repoDir)
+  const resolvedTests = resolveVitestTargetsForChanges(changeSet.files, repoFiles)
+  if (resolvedTests.length === 0) {
+    return {
+      ok: false,
+      error: 'no_resolved_tests_for_changed_files',
+      changedFiles: changeSet.files,
+      resolvedTests: [],
+    }
+  }
+
+  return {
+    ok: true,
+    command: `pnpm test --run ${resolvedTests.map((filePath) => escapeShellArg(filePath)).join(' ')}`,
+    changedFiles: changeSet.files,
+    resolvedTests,
+  }
+}
+
+function seedCanonicalTask(state, tasks = []) {
+  const current = Array.isArray(tasks) ? tasks : []
+  const persisted = summarizeTaskRef(state?.activeTask)
+  if (persisted) {
+    const matched = current.find((task) => tasksMatch(task, persisted) && !isTaskDone(task))
+    if (matched) return matched
+  }
+
+  const inFlight = current.filter((task) => {
+    const status = String(task?.status ?? '').trim().toLowerCase()
+    return status === 'coordinating' || status === 'executing' || status === 'in review'
+  })
+
+  return inFlight.length === 1 ? inFlight[0] : null
+}
+
+function createFailureTurnResult(state, profileName, phaseResults, turnStart, errorSummary, extra = {}) {
+  return {
+    turn: state.turn,
+    timestamp: nowIso(),
+    profile: profileName,
+    ok: false,
+    durationMs: Date.now() - turnStart,
+    phases: phaseResults,
+    errorSummary,
+    canonicalActiveTask: extra.canonicalActiveTask ?? null,
+    linearWarnings: extra.linearWarnings ?? [],
+    transportDegraded: Boolean(extra.transportDegraded),
+    deliverySummary: extra.deliverySummary ?? { committed: false, pushed: false, error: null },
+    verificationSummary: extra.verificationSummary ?? {},
+  }
+}
+
+function describeLinearMarker(marker) {
+  if (!marker) return 'unknown'
+  if (marker.issueId) return `issue_id=${marker.issueId}`
+  if (marker.identifier) return `identifier=${marker.identifier}`
+  if (marker.title) return `title=${marker.title}`
+  return marker.type ?? 'unknown'
+}
+
+function selectCanonicalActiveCandidate(phaseId, candidates, canonicalActiveTask, linearWarnings) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null
+  }
+
+  const matchingCanonical = canonicalActiveTask
+    ? candidates.filter((candidate) => tasksMatch(candidate.task, canonicalActiveTask))
+    : []
+
+  if (canonicalActiveTask) {
+    for (const candidate of candidates) {
+      if (!tasksMatch(candidate.task, canonicalActiveTask)) {
+        linearWarnings.push(
+          `${phaseId}: ignored LINEAR_ACTIVE for ${describeLinearMarker(candidate.marker)} because canonical task is locked`
+        )
+      }
+    }
+
+    if (matchingCanonical.length > 1) {
+      for (const ignored of matchingCanonical.slice(0, -1)) {
+        linearWarnings.push(
+          `${phaseId}: ignored earlier LINEAR_ACTIVE for ${describeLinearMarker(ignored.marker)} in favor of the last canonical marker`
+        )
+      }
+    }
+
+    return matchingCanonical.at(-1) ?? null
+  }
+
+  if (!canBindCanonicalTask(phaseId)) {
+    for (const candidate of candidates) {
+      linearWarnings.push(
+        `${phaseId}: ignored LINEAR_ACTIVE for ${describeLinearMarker(candidate.marker)} because this phase cannot bind the canonical task`
+      )
+    }
+    return null
+  }
+
+  if (candidates.length > 1) {
+    for (const ignored of candidates.slice(0, -1)) {
+      linearWarnings.push(
+        `${phaseId}: ignored earlier LINEAR_ACTIVE for ${describeLinearMarker(ignored.marker)} in favor of the last valid marker`
+      )
+    }
+  }
+
+  return candidates.at(-1) ?? null
+}
+
 async function loadTurnInputs(config, options = {}) {
   const repoContext = options.repoContext ?? await collectRepoContext(config, runCommand, {
     env: options.env ?? process.env,
@@ -278,155 +527,177 @@ async function runTurn(config, state, turnDir, options = {}) {
     options.prefetchedStrategist?.profileName === profileName
       ? options.prefetchedStrategist
       : null
-
-  if (config.repoPolicy?.pushBranch) {
-    await ensureOnDeliveryBranch(config, {
-      env: process.env,
-      turnLabel,
-    })
-  }
-
-  const prefetchedInputs = prefetchedStrategist
-    ? {
-        repoContext: prefetchedStrategist.repoContext,
-        linearTasks: prefetchedStrategist.linearTasks,
-        linearContext: prefetchedStrategist.linearContext,
-      }
-    : null
-  const {
-    repoContext,
-    linearTasks: initialLinearTasks,
-    linearContext: initialLinearContext,
-  } = await loadTurnInputs(config, {
-    env: process.env,
-    ...(prefetchedInputs ?? {}),
-  })
-  const repoContextPath = path.join(turnDir, 'repo-context.txt')
-  await fs.writeFile(repoContextPath, repoContext, 'utf8')
-  let linearTasks = initialLinearTasks
-  let linearContext = initialLinearContext
-  const linearContextPath = path.join(turnDir, 'linear-context.txt')
-  await fs.writeFile(linearContextPath, linearContext, 'utf8')
-
-  const context = {
-    turn: state.turn,
-    timestamp: nowIso(),
-    profileName,
-    profileDescription: profile.description ?? '',
-    repoContextPath,
-    linearContextPath,
-    contextCommands: config.context?.commands ?? [],
-    phases: profile.phases,
-    prefetchedStrategistUsed: Boolean(prefetchedStrategist),
-  }
-  await writeJson(path.join(turnDir, 'context.json'), context)
-
   const phaseResults = []
-  let ok = true
-  let errorSummary = null
+  const ignoredRepoPaths = internalRepoPaths(config)
+  const deliverySummary = {
+    committed: false,
+    pushed: false,
+    subject: null,
+    branch: null,
+    error: null,
+  }
+  const verificationSummary = {}
+  const linearWarnings = []
+  const pendingDoneMarkers = []
+  let transportDegraded = false
   let handoff = ''
-  let activeTask = null
   let reviewerAssessment = {
     reliable: false,
     lowRisk: false,
     files: [],
   }
-  const ignoredRepoPaths = internalRepoPaths(config)
-  const linearTaskCache = new Map()
-  const rememberLinearTask = (task) => {
+  let repoContext = ''
+  let linearTasks = null
+  let linearContext = ''
+  let repoContextPath = path.join(turnDir, 'repo-context.txt')
+  let linearContextPath = path.join(turnDir, 'linear-context.txt')
+  let canonicalActiveTask = null
+  let turnSnapshot = null
+  const linearResolutionCache = new Map()
+
+  const refreshLinearContext = async () => {
+    linearContext = buildLinearContext(
+      linearTasks,
+      Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
+    )
+    await fs.writeFile(linearContextPath, linearContext, 'utf8')
+  }
+  const rememberResolvedTask = (task) => {
     if (!task?.id) return task
-    linearTaskCache.set(task.id, task)
+    linearResolutionCache.set(task.id, task)
     return task
   }
-  const rememberLinearTasks = (tasks) => {
-    for (const task of tasks ?? []) rememberLinearTask(task)
+  const rememberResolvedTasks = (tasks = []) => {
+    for (const task of tasks) rememberResolvedTask(task)
   }
-  rememberLinearTasks(linearTasks)
-  if (linearTasks && linearTasks.length > 0) {
-    const seeded = linearTasks.find((task) => {
-      const status = String(task.status ?? '').trim().toLowerCase()
-      return status === 'executing' || status === 'in review'
-    })
-    if (seeded) activeTask = rememberLinearTask(seeded)
-  }
-
-  const resolveActiveTask = async (marker, tasks) => {
-    if (!marker) return null
-    rememberLinearTasks(tasks)
-    if (marker.issueId) {
-      const normalizedIssueId = String(marker.issueId).trim()
-      const cached = linearTaskCache.get(normalizedIssueId)
+  const resolveTaskReference = async (marker, tasks = linearTasks ?? []) => {
+    if (marker?.issueId) {
+      const cached = linearResolutionCache.get(String(marker.issueId).trim())
       if (cached) return cached
-      const fetched = await queryLinearIssueById(config, normalizedIssueId, {
-        env: process.env,
-      })
-      if (fetched) return rememberLinearTask(fetched)
-      return { id: normalizedIssueId }
     }
-    if (marker.identifier) {
-      const normalized = String(marker.identifier).trim().toUpperCase()
-      const found = tasks?.find((task) => String(task.identifier ?? '').trim().toUpperCase() === normalized)
-      return found ? rememberLinearTask(found) : { identifier: normalized }
-    }
-    if (marker.title) {
-      const normalized = String(marker.title).trim().toLowerCase()
-      const found = tasks?.find((task) => String(task.title ?? '').trim().toLowerCase() === normalized)
-      if (found) return rememberLinearTask(found)
-      const fallback = { title: String(marker.title).trim() }
-      const keyMatch = fallback.title.match(/([A-Z]+-\d+)/)
-      if (keyMatch) fallback.identifier = keyMatch[1]
-      return fallback
-    }
-    return null
+
+    const resolved = await resolveLinearTaskReference(config, marker, tasks, {
+      env: process.env,
+    })
+    return rememberResolvedTask(resolved)
   }
 
-  for (let index = 0; index < profile.phases.length; index += 1) {
-    const phase = profile.phases[index]
-    const phaseRun = phase.run ?? (phase.command ? { kind: 'shell', command: phase.command } : null)
-    const prefix = String(index + 1).padStart(2, '0')
-    const handoffPath = path.join(turnDir, `${prefix}-${phase.id}.handoff.txt`)
-    await fs.writeFile(handoffPath, handoff, 'utf8')
-
-    if (isReviewerPhase(phase.id)) {
-      const shouldSkip =
-        config.reviewerPolicy === 'skip' ||
-        (config.reviewerPolicy === 'risk-based' && reviewerAssessment.lowRisk)
-      if (shouldSkip) {
-        console.log(`[Turn ${state.turn}] Skipping reviewer (policy: ${config.reviewerPolicy})`)
-        phaseResults.push({
-          id: phase.id,
-          kind: phaseRun?.kind,
-          command: phaseRun?.kind === 'shell' ? phaseRun.command : undefined,
-          agent: phaseRun?.kind === 'kiro' ? phaseRun.agent : undefined,
-          code: 0,
-          timedOut: false,
-          durationMs: 0,
-          allowFailure: Boolean(phase.allowFailure),
-          skipped: true,
-          skipReason: config.reviewerPolicy,
-        })
-        await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stdout.log`), '', 'utf8')
-        await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stderr.log`), '', 'utf8')
-        continue
-      }
+  try {
+    if (config.repoPolicy?.pushBranch) {
+      await ensureOnDeliveryBranch(config, {
+        env: process.env,
+        turnLabel,
+      })
     }
 
-    const usePrefetchedStrategist =
-      prefetchedStrategist &&
-      prefetchedStrategist.phaseIndex === index &&
-      prefetchedStrategist.phaseId === phase.id
+    turnSnapshot = await captureWorktreeSnapshot(config.repoDir, {
+      env: process.env,
+      ignorePaths: ignoredRepoPaths,
+    })
+    if (turnSnapshot?.status?.trim()) {
+      const turnResult = createFailureTurnResult(
+        state,
+        profileName,
+        phaseResults,
+        turnStart,
+        'Working tree dirty at turn start'
+      )
+      await writeJson(path.join(turnDir, 'result.json'), turnResult)
+      await writeTurnResultMarkdown(turnDir, turnResult)
+      return turnResult
+    }
 
-    let promptPath = null
-    let phaseToRun = phase
-    let result = null
-    if (usePrefetchedStrategist) {
-      if (prefetchedStrategist.prompt != null) {
-        promptPath = path.join(turnDir, `${prefix}-${phase.id}.prompt.txt`)
-        await fs.writeFile(promptPath, prefetchedStrategist.prompt, 'utf8')
+    const prefetchedInputs = prefetchedStrategist
+      ? {
+          repoContext: prefetchedStrategist.repoContext,
+          linearTasks: prefetchedStrategist.linearTasks,
+          linearContext: prefetchedStrategist.linearContext,
+        }
+      : null
+    const loadedInputs = await loadTurnInputs(config, {
+      env: process.env,
+      ...(prefetchedInputs ?? {}),
+    })
+    repoContext = loadedInputs.repoContext
+    linearTasks = loadedInputs.linearTasks
+    linearContext = loadedInputs.linearContext
+    rememberResolvedTasks(linearTasks ?? [])
+
+    await fs.writeFile(repoContextPath, repoContext, 'utf8')
+    await fs.writeFile(linearContextPath, linearContext, 'utf8')
+
+    canonicalActiveTask = seedCanonicalTask(state, linearTasks ?? [])
+    rememberResolvedTask(canonicalActiveTask)
+
+    const context = {
+      turn: state.turn,
+      timestamp: nowIso(),
+      profileName,
+      profileDescription: profile.description ?? '',
+      repoContextPath,
+      linearContextPath,
+      contextCommands: config.context?.commands ?? [],
+      phases: profile.phases,
+      prefetchedStrategistUsed: Boolean(prefetchedStrategist),
+      canonicalActiveTask: summarizeTaskRef(canonicalActiveTask),
+    }
+    await writeJson(path.join(turnDir, 'context.json'), context)
+
+    for (let index = 0; index < profile.phases.length; index += 1) {
+      const phase = profile.phases[index]
+      const phaseRun = phase.run ?? (phase.command ? { kind: 'shell', command: phase.command } : null)
+      const prefix = String(index + 1).padStart(2, '0')
+      const handoffPath = path.join(turnDir, `${prefix}-${phase.id}.handoff.txt`)
+      await fs.writeFile(handoffPath, handoff, 'utf8')
+
+      if (isReviewerPhase(phase.id)) {
+        const shouldSkip =
+          config.reviewerPolicy === 'skip' ||
+          (config.reviewerPolicy === 'risk-based' && reviewerAssessment.lowRisk)
+        if (shouldSkip) {
+          console.log(`[Turn ${state.turn}] Skipping reviewer (policy: ${config.reviewerPolicy})`)
+          const skippedPhase = {
+            id: phase.id,
+            kind: phaseRun?.kind,
+            command: phaseRun?.kind === 'shell' ? phaseRun.command : undefined,
+            agent: phaseRun?.kind === 'kiro' ? phaseRun.agent : undefined,
+            code: 0,
+            timedOut: false,
+            durationMs: 0,
+            allowFailure: Boolean(phase.allowFailure),
+            skipped: true,
+            skipReason: config.reviewerPolicy,
+          }
+          phaseResults.push(skippedPhase)
+          verificationSummary[phase.id] = {
+            ok: true,
+            skipped: true,
+            code: 0,
+          }
+          await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stdout.log`), '', 'utf8')
+          await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stderr.log`), '', 'utf8')
+          continue
+        }
       }
-      result = prefetchedStrategist.result
-    } else {
-      if (phaseRun?.kind === 'kiro') {
+
+      const usePrefetchedStrategist =
+        prefetchedStrategist &&
+        prefetchedStrategist.phaseIndex === index &&
+        prefetchedStrategist.phaseId === phase.id
+
+      let promptPath = null
+      let phaseToRun = phase
+      let result = null
+      let resolvedTests = []
+      let changedFiles = []
+
+      if (usePrefetchedStrategist) {
+        if (prefetchedStrategist.prompt != null) {
+          promptPath = path.join(turnDir, `${prefix}-${phase.id}.prompt.txt`)
+          await fs.writeFile(promptPath, prefetchedStrategist.prompt, 'utf8')
+        }
+        result = prefetchedStrategist.result
+      } else if (phaseRun?.kind === 'kiro') {
         const prompt = composeKiroPrompt(phaseRun.prompt, {
           repoContext,
           linearContext: shouldInjectLinearContext(config, phase.id) ? linearContext : '',
@@ -441,146 +712,367 @@ async function runTurn(config, state, turnDir, options = {}) {
             prompt,
           },
         }
-      }
-    }
-
-    const executorSnapshot =
-      config.reviewerPolicy === 'risk-based' && isExecutorPhase(phase.id)
-        ? await captureWorktreeSnapshot(config.repoDir, {
-            env: process.env,
-            ignorePaths: ignoredRepoPaths,
-          })
-        : null
-
-    if (!result) {
-      result = await runPhase(phaseToRun, {
-        cwd: config.repoDir,
-        env: {
-          ...process.env,
-          ZHUGE_TURN: String(state.turn),
-          ZHUGE_PROFILE: profileName,
-          ZHUGE_PHASE: phase.id,
-          ZHUGE_REPO_CONTEXT: repoContext,
-          ZHUGE_REPO_CONTEXT_PATH: repoContextPath,
-          ZHUGE_LINEAR_CONTEXT: linearContext,
-          ZHUGE_LINEAR_CONTEXT_PATH: linearContextPath,
-          ZHUGE_HANDOFF: handoff,
-          ZHUGE_HANDOFF_PATH: handoffPath,
-        },
-        kiro: config.kiro,
-      })
-    }
-
-    const phaseResult = {
-      id: phase.id,
-      kind: result.kind ?? phaseRun?.kind,
-      command: phaseRun?.kind === 'shell' ? phaseRun.command : undefined,
-      agent: phaseRun?.kind === 'kiro' ? phaseRun.agent : undefined,
-      code: result.code,
-      timedOut: result.timedOut,
-      durationMs: result.durationMs,
-      allowFailure: Boolean(phase.allowFailure),
-      adapterUsed: result.adapterUsed,
-      fallbackUsed: result.fallbackUsed,
-      prefetched: Boolean(usePrefetchedStrategist),
-    }
-
-    const markers = parseLinearMarkers(result.out)
-    const activeMarker = markers.find((marker) => marker.type === 'active')
-    if (markers.length > 0) {
-      phaseResult.linearMarkers = markers
-      await processLinearMarkers(config, markers, phase.id, linearTasks ?? [], {
-        env: process.env,
-      })
-      linearTasks = (await queryLinearTasks(config, {
-        env: process.env,
-      })) ?? linearTasks
-      rememberLinearTasks(linearTasks)
-      linearContext = buildLinearContext(
-        linearTasks,
-        Number(config.integrations?.linear?.contextMaxChars ?? 4_000)
-      )
-      await fs.writeFile(linearContextPath, linearContext, 'utf8')
-    }
-    activeTask = await resolveActiveTask(activeMarker, linearTasks) ?? activeTask
-
-    phaseResults.push(phaseResult)
-
-    await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stdout.log`), result.out, 'utf8')
-    await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stderr.log`), result.err, 'utf8')
-    if (result.kind === 'kiro' && phaseRun?.kind === 'kiro') {
-      const metadataPath = path.join(turnDir, `${prefix}-${phase.id}.meta.json`)
-      phaseResult.metadataPath = metadataPath
-      await writeJson(metadataPath, {
-        kind: 'kiro',
-        agent: phaseRun.agent,
-        adapterRequested: result.adapterRequested ?? 'acp',
-        adapterUsed: result.adapterUsed ?? 'acp',
-        fallbackUsed: Boolean(result.fallbackUsed),
-        timedOut: Boolean(result.timedOut),
-        durationMs: result.durationMs,
-        sessionId: result.metadata?.sessionId ?? null,
-        contextUsagePercentage: result.metadata?.contextUsagePercentage ?? null,
-        metadataEvents: Array.isArray(result.metadata?.metadataEvents) ? result.metadata.metadataEvents : [],
-        repoContextPath,
-        linearContextPath,
-        handoffPath,
-        promptPath,
-        repoContextIncluded: Boolean(repoContext),
-        linearContextIncluded: Boolean(shouldInjectLinearContext(config, phase.id) && linearContext),
-        handoffIncluded: Boolean(handoff),
-      })
-    }
-
-    handoff = truncateHandoff(result.out)
-
-    if (config.reviewerPolicy === 'risk-based' && isExecutorPhase(phase.id) && result.code === 0) {
-      reviewerAssessment = await assessReviewerRisk(config, executorSnapshot, {
-        env: process.env,
-        ignorePaths: ignoredRepoPaths,
-      })
-    }
-
-    if (result.code === 0) {
-      const commitResult = await commitWorkingTreeIfDirty(config, {
-        env: process.env,
-        activeTask,
-        phaseId: phase.id,
-        turnLabel,
-      })
-      if (commitResult.committed) {
-        phaseResult.commitSubject = commitResult.subject
-        const pushResult = await pushBranchIfNeeded(config, {
-          env: process.env,
-          turnLabel,
-        })
-        if (pushResult.pushed) {
-          phaseResult.pushedBranch = pushResult.branch
+      } else if (phaseRun?.kind === 'vitestChanged') {
+        const vitestPlan = await buildVitestChangedCommand(config, turnSnapshot, ignoredRepoPaths)
+        resolvedTests = vitestPlan.resolvedTests
+        changedFiles = vitestPlan.changedFiles
+        if (!vitestPlan.ok) {
+          result = {
+            kind: 'shell',
+            code: 1,
+            timedOut: false,
+            durationMs: 0,
+            startedAt: nowIso(),
+            endedAt: nowIso(),
+            out: '',
+            err: vitestPlan.error,
+          }
+        } else {
+          phaseToRun = {
+            ...phase,
+            run: {
+              kind: 'shell',
+              command: vitestPlan.command,
+            },
+          }
         }
       }
+
+      const executorSnapshot =
+        config.reviewerPolicy === 'risk-based' && isExecutorPhase(phase.id)
+          ? await captureWorktreeSnapshot(config.repoDir, {
+              env: process.env,
+              ignorePaths: ignoredRepoPaths,
+            })
+          : null
+
+      if (!result) {
+        result = await runPhase(phaseToRun, {
+          cwd: config.repoDir,
+          env: {
+            ...process.env,
+            ZHUGE_TURN: String(state.turn),
+            ZHUGE_PROFILE: profileName,
+            ZHUGE_PHASE: phase.id,
+            ZHUGE_REPO_CONTEXT: repoContext,
+            ZHUGE_REPO_CONTEXT_PATH: repoContextPath,
+            ZHUGE_LINEAR_CONTEXT: linearContext,
+            ZHUGE_LINEAR_CONTEXT_PATH: linearContextPath,
+            ZHUGE_HANDOFF: handoff,
+            ZHUGE_HANDOFF_PATH: handoffPath,
+          },
+          kiro: config.kiro,
+        })
+      }
+
+      if (isReviewerPhase(phase.id) && result.code === 0 && hasReviewerValidationFailure(result)) {
+        result = {
+          ...result,
+          code: 1,
+          err: [String(result.err ?? '').trim(), '[REVIEWER_VALIDATION_FAILURE] reviewer transport returned invalid tool usage']
+            .filter(Boolean)
+            .join('\n'),
+        }
+      }
+
+      const phaseResult = {
+        id: phase.id,
+        kind: result.kind ?? phaseRun?.kind,
+        command:
+          phaseRun?.kind === 'shell'
+            ? phaseRun.command
+            : phaseRun?.kind === 'vitestChanged'
+              ? phaseToRun.run.command
+              : undefined,
+        agent: phaseRun?.kind === 'kiro' ? phaseRun.agent : undefined,
+        code: result.code,
+        timedOut: result.timedOut,
+        durationMs: result.durationMs,
+        allowFailure: Boolean(phase.allowFailure),
+        adapterUsed: result.adapterUsed,
+        fallbackUsed: result.fallbackUsed,
+        prefetched: Boolean(usePrefetchedStrategist),
+      }
+
+      if (phaseRun?.kind === 'vitestChanged') phaseResult.kind = 'vitestChanged'
+      if (phaseRun?.kind === 'vitestChanged') {
+        phaseResult.resolvedTests = resolvedTests
+        phaseResult.changedFiles = changedFiles
+      }
+      if (result.fallbackUsed) {
+        phaseResult.transportDegraded = true
+        transportDegraded = true
+      }
+
+      await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stdout.log`), result.out, 'utf8')
+      await fs.writeFile(path.join(turnDir, `${prefix}-${phase.id}.stderr.log`), result.err, 'utf8')
+      if (result.kind === 'kiro' && phaseRun?.kind === 'kiro') {
+        const metadataPath = path.join(turnDir, `${prefix}-${phase.id}.meta.json`)
+        phaseResult.metadataPath = metadataPath
+        await writeJson(metadataPath, {
+          kind: 'kiro',
+          agent: phaseRun.agent,
+          adapterRequested: result.adapterRequested ?? 'acp',
+          adapterUsed: result.adapterUsed ?? 'acp',
+          fallbackUsed: Boolean(result.fallbackUsed),
+          timedOut: Boolean(result.timedOut),
+          durationMs: result.durationMs,
+          sessionId: result.metadata?.sessionId ?? null,
+          contextUsagePercentage: result.metadata?.contextUsagePercentage ?? null,
+          metadataEvents: Array.isArray(result.metadata?.metadataEvents) ? result.metadata.metadataEvents : [],
+          repoContextPath,
+          linearContextPath,
+          handoffPath,
+          promptPath,
+          repoContextIncluded: Boolean(repoContext),
+          linearContextIncluded: Boolean(shouldInjectLinearContext(config, phase.id) && linearContext),
+          handoffIncluded: Boolean(handoff),
+        })
+      }
+
+      if (result.code === 0) {
+        const markers = parseLinearMarkers(result.out)
+        if (markers.length > 0) {
+          phaseResult.linearMarkers = markers
+        }
+
+        const activeCandidates = []
+        let linearContextDirty = false
+        for (const marker of markers) {
+          if (marker.type === 'new_task') {
+            const processed = await processLinearMarkers(config, [marker], phase.id, linearTasks ?? [], {
+              env: process.env,
+            })
+            if (Array.isArray(processed.tasks)) {
+              linearTasks = processed.tasks
+              rememberResolvedTasks(linearTasks)
+            } else {
+              linearTasks = (await queryLinearTasks(config, { env: process.env })) ?? linearTasks
+              rememberResolvedTasks(linearTasks ?? [])
+            }
+            linearContextDirty = true
+            continue
+          }
+
+          if (marker.type === 'active') {
+            const task = await resolveTaskReference(marker, linearTasks ?? [])
+            activeCandidates.push({ marker, task })
+            continue
+          }
+
+          if (marker.type === 'done') {
+            pendingDoneMarkers.push({ phaseId: phase.id, marker })
+          }
+        }
+
+        const selectedActiveCandidate = selectCanonicalActiveCandidate(
+          phase.id,
+          activeCandidates.filter((candidate) => candidate.task),
+          canonicalActiveTask,
+          linearWarnings
+        )
+        if (selectedActiveCandidate) {
+          const processed = await processLinearMarkers(
+            config,
+            [selectedActiveCandidate.marker],
+            phase.id,
+            linearTasks ?? [],
+            { env: process.env }
+          )
+          if (Array.isArray(processed.tasks)) {
+            linearTasks = processed.tasks
+            rememberResolvedTasks(linearTasks)
+          } else {
+            linearTasks = (await queryLinearTasks(config, { env: process.env })) ?? linearTasks
+            rememberResolvedTasks(linearTasks ?? [])
+          }
+          canonicalActiveTask =
+            await resolveTaskReference(selectedActiveCandidate.marker, linearTasks ?? []) ??
+            rememberResolvedTask(selectedActiveCandidate.task) ??
+            canonicalActiveTask
+          linearContextDirty = true
+        }
+
+        if (linearContextDirty) {
+          await refreshLinearContext()
+        }
+      }
+
+      handoff = truncateHandoff(result.out)
+
+      if (config.reviewerPolicy === 'risk-based' && isExecutorPhase(phase.id) && result.code === 0) {
+        reviewerAssessment = await assessReviewerRisk(config, executorSnapshot, {
+          env: process.env,
+          ignorePaths: ignoredRepoPaths,
+        })
+      }
+
+      if (isReviewerPhase(phase.id) || ['typecheck', 'vitest', 'build'].includes(phase.id)) {
+        verificationSummary[phase.id] = {
+          ok: result.code === 0,
+          code: result.code,
+          transportDegraded: Boolean(phaseResult.transportDegraded),
+          resolvedTests,
+          changedFiles,
+        }
+      }
+
+      phaseResults.push(phaseResult)
+
+      if (result.code !== 0 && !phase.allowFailure) {
+        const baseError = phaseRun?.kind === 'vitestChanged'
+          ? `Phase ${phase.id} failed: ${String(result.err ?? result.out ?? '').trim() || `code ${result.code}`}`
+          : `Phase ${phase.id} failed with code ${result.code}`
+        const turnResult = createFailureTurnResult(
+          state,
+          profileName,
+          phaseResults,
+          turnStart,
+          baseError,
+          {
+            canonicalActiveTask: summarizeTaskRef(canonicalActiveTask),
+            linearWarnings,
+            transportDegraded,
+            deliverySummary,
+            verificationSummary,
+          }
+        )
+        await writeJson(path.join(turnDir, 'result.json'), turnResult)
+        await writeTurnResultMarkdown(turnDir, turnResult)
+        return turnResult
+      }
     }
 
-    if (result.code !== 0 && !phase.allowFailure) {
-      ok = false
-      errorSummary = `Phase ${phase.id} failed with code ${result.code}`
-      break
+    const finalSnapshot = await captureWorktreeSnapshot(config.repoDir, {
+      env: process.env,
+      ignorePaths: ignoredRepoPaths,
+    })
+    const worktreeDirty = Boolean(finalSnapshot?.status?.trim())
+    if (worktreeDirty && config.integrations?.linear?.enabled && !canonicalActiveTask) {
+      const turnResult = createFailureTurnResult(
+        state,
+        profileName,
+        phaseResults,
+        turnStart,
+        'Working tree changed without a canonical Linear task binding',
+        {
+          canonicalActiveTask: null,
+          linearWarnings,
+          transportDegraded,
+          deliverySummary,
+          verificationSummary,
+        }
+      )
+      await writeJson(path.join(turnDir, 'result.json'), turnResult)
+      await writeTurnResultMarkdown(turnDir, turnResult)
+      return turnResult
     }
+
+    if (worktreeDirty && (config.repoPolicy?.autoCommitAfterEachPhase || config.repoPolicy?.autoPushAfterEachPhase)) {
+      const commitResult = await commitWorkingTreeIfDirty(config, {
+        env: process.env,
+        activeTask: canonicalActiveTask,
+        deliveryScope: 'turn',
+        turnLabel,
+      })
+      if (!commitResult.committed && config.repoPolicy?.autoCommitAfterEachPhase) {
+        throw new Error(commitResult.skippedReason ?? 'delivery commit did not complete')
+      }
+      if (commitResult.committed) {
+        deliverySummary.committed = true
+        deliverySummary.subject = commitResult.subject
+      }
+      const pushResult = await pushBranchIfNeeded(config, {
+        env: process.env,
+        turnLabel,
+      })
+      if (pushResult.pushed) {
+        deliverySummary.pushed = true
+        deliverySummary.branch = pushResult.branch
+      }
+    }
+
+    if (canonicalActiveTask && pendingDoneMarkers.length > 0) {
+      const matchingDoneMarkers = []
+      for (const entry of pendingDoneMarkers) {
+        const resolvedTask = await resolveTaskReference(entry.marker, linearTasks ?? [])
+        if (resolvedTask && tasksMatch(resolvedTask, canonicalActiveTask)) {
+          matchingDoneMarkers.push(entry)
+        } else {
+          linearWarnings.push(
+            `${entry.phaseId}: ignored LINEAR_DONE for ${describeLinearMarker(entry.marker)} because it does not match the canonical task`
+          )
+        }
+      }
+
+      const selectedDoneMarker = matchingDoneMarkers.at(-1) ?? null
+      if (selectedDoneMarker) {
+        const processed = await processLinearMarkers(
+          config,
+          [selectedDoneMarker.marker],
+          selectedDoneMarker.phaseId,
+          linearTasks ?? [],
+          { env: process.env }
+        )
+        if (Array.isArray(processed.tasks)) {
+          linearTasks = processed.tasks
+          rememberResolvedTasks(linearTasks)
+        } else {
+          linearTasks = (await queryLinearTasks(config, { env: process.env })) ?? linearTasks
+          rememberResolvedTasks(linearTasks ?? [])
+        }
+        canonicalActiveTask =
+          await resolveTaskReference(selectedDoneMarker.marker, linearTasks ?? []) ??
+          rememberResolvedTask({ ...canonicalActiveTask, status: 'Done' })
+        deliverySummary.done = true
+        await refreshLinearContext()
+      }
+    } else if (!canonicalActiveTask && pendingDoneMarkers.length > 0) {
+      for (const entry of pendingDoneMarkers) {
+        linearWarnings.push(
+          `${entry.phaseId}: ignored LINEAR_DONE for ${describeLinearMarker(entry.marker)} because no canonical task was bound`
+        )
+      }
+    }
+
+    const turnResult = {
+      turn: state.turn,
+      timestamp: nowIso(),
+      profile: profileName,
+      ok: true,
+      durationMs: Date.now() - turnStart,
+      phases: phaseResults,
+      errorSummary: null,
+      canonicalActiveTask: summarizeTaskRef(canonicalActiveTask),
+      linearWarnings,
+      transportDegraded,
+      deliverySummary,
+      verificationSummary,
+    }
+
+    await writeJson(path.join(turnDir, 'result.json'), turnResult)
+    await writeTurnResultMarkdown(turnDir, turnResult)
+    return turnResult
+  } catch (error) {
+    deliverySummary.error = error?.message ?? String(error)
+    const turnResult = createFailureTurnResult(
+      state,
+      profileName,
+      phaseResults,
+      turnStart,
+      `Runtime error: ${deliverySummary.error}`,
+      {
+        canonicalActiveTask: summarizeTaskRef(canonicalActiveTask),
+        linearWarnings,
+        transportDegraded,
+        deliverySummary,
+        verificationSummary,
+      }
+    )
+    await writeJson(path.join(turnDir, 'result.json'), turnResult)
+    await writeTurnResultMarkdown(turnDir, turnResult)
+    return turnResult
   }
-
-  const turnResult = {
-    turn: state.turn,
-    timestamp: nowIso(),
-    profile: profileName,
-    ok,
-    durationMs: Date.now() - turnStart,
-    phases: phaseResults,
-    errorSummary,
-  }
-
-  await writeJson(path.join(turnDir, 'result.json'), turnResult)
-  await writeTurnResultMarkdown(turnDir, turnResult)
-
-  return turnResult
 }
 
 export async function runLoop(config, options = {}) {

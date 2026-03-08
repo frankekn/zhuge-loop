@@ -9,8 +9,8 @@
   "sleepMs": 120000,
   "maxConsecutiveFailures": 3,
   "keepRecentTurns": 30,
-  "pipeline": true,
-  "reviewerPolicy": "risk-based",
+  "pipeline": false,
+  "reviewerPolicy": "always",
   "context": {
     "commands": [
       {
@@ -28,7 +28,7 @@
     ]
   },
   "repoPolicy": {
-    "onDirty": "auto-stash",
+    "onDirty": "warn",
     "pushBranch": "agent-dev",
     "autoCommitAfterEachPhase": true,
     "autoPushAfterEachPhase": true,
@@ -105,8 +105,7 @@
         {
           "id": "vitest",
           "run": {
-            "kind": "shell",
-            "command": "pnpm test --run --changed"
+            "kind": "vitestChanged"
           },
           "timeoutMs": 300000,
           "allowFailure": false

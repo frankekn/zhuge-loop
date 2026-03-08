@@ -71,6 +71,28 @@ test('normalizeConfig accepts explicit phase.run for shell and kiro', () => {
   assert.equal(config.kiro.acpCommand, 'kiro-acp')
 })
 
+test('normalizeConfig accepts vitestChanged phase kind', () => {
+  const config = normalizeConfig(
+    {
+      profileRotation: ['default'],
+      profiles: {
+        default: {
+          phases: [
+            {
+              id: 'vitest',
+              run: { kind: 'vitestChanged' },
+              timeoutMs: 1000,
+            },
+          ],
+        },
+      },
+    },
+    path.resolve('/tmp/zhuge.config.json')
+  )
+
+  assert.equal(config.profiles.default.phases[0].run.kind, 'vitestChanged')
+})
+
 test('normalizeConfig accepts custom context commands', () => {
   const config = normalizeConfig(
     {

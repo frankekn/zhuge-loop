@@ -19,6 +19,10 @@ function normalizeTaskStatus(status) {
   return String(status ?? '').trim().toLowerCase()
 }
 
+function normalizeIdentifier(value) {
+  return String(value ?? '').trim().toUpperCase()
+}
+
 function filterActiveLinearTasks(tasks) {
   const keepStatuses = new Set([
     'todo',
@@ -32,7 +36,7 @@ function filterActiveLinearTasks(tasks) {
   return (tasks || []).filter((task) => keepStatuses.has(normalizeTaskStatus(task?.status)))
 }
 
-function normalizeTitle(value) {
+export function normalizeTitle(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
@@ -82,6 +86,97 @@ function parseTaskTitleHint(payload) {
 function parseIdentifierHint(payload) {
   const match = String(payload ?? '').match(/identifier\s*=\s*["'`]?([A-Za-z]+-\d+(?:-[A-Za-z0-9]+)?)["'`]?/i)
   if (match) return match[1].trim().toUpperCase()
+  return null
+}
+
+function createTaskLookup(tasks = []) {
+  const byId = new Map()
+  const byTitle = new Map()
+  const byIdentifier = new Map()
+
+  for (const task of tasks) {
+    if (!task || typeof task !== 'object') continue
+    const id = String(task.id ?? '').trim()
+    if (id && !byId.has(id)) byId.set(id, task)
+
+    const title = normalizeTitle(task.title)
+    if (title && !byTitle.has(title)) byTitle.set(title, task)
+
+    const identifier = normalizeIdentifier(task.identifier)
+    if (identifier && !byIdentifier.has(identifier)) byIdentifier.set(identifier, task)
+  }
+
+  return {
+    byId,
+    byTitle,
+    byIdentifier,
+  }
+}
+
+function addTaskToLookup(lookup, task) {
+  if (!lookup || !task || typeof task !== 'object') return null
+
+  const normalized = normalizeLinearIssue(task) ?? (() => {
+    const id = String(task.id ?? '').trim()
+    const title = String(task.title ?? '').trim()
+    if (!id || !title) return null
+    return {
+      id,
+      identifier: String(task.identifier ?? '').trim() || undefined,
+      title,
+      status: String(task.status ?? 'unknown'),
+      priority: String(task.priority ?? 'unset'),
+    }
+  })()
+
+  if (!normalized) return null
+
+  lookup.byId.set(normalized.id, normalized)
+  const title = normalizeTitle(normalized.title)
+  if (title) lookup.byTitle.set(title, normalized)
+  const identifier = normalizeIdentifier(normalized.identifier)
+  if (identifier) lookup.byIdentifier.set(identifier, normalized)
+  return normalized
+}
+
+function resolveMarkerTaskFromLookup(marker, lookup) {
+  if (!marker || !lookup) return null
+
+  if (marker.issueId) {
+    return lookup.byId.get(String(marker.issueId).trim()) ?? null
+  }
+
+  if (marker.identifier) {
+    return lookup.byIdentifier.get(normalizeIdentifier(marker.identifier)) ?? null
+  }
+
+  if (marker.title) {
+    return lookup.byTitle.get(normalizeTitle(marker.title)) ?? null
+  }
+
+  return null
+}
+
+function parseCreatedTaskOutput(output, fallbackPayload = {}) {
+  const raw = String(output ?? '').trim()
+  if (!raw) return null
+
+  const parsed = tryParseJsonObject(raw)
+  if (parsed) {
+    return normalizeLinearIssue({
+      ...fallbackPayload,
+      ...parsed,
+      state: parsed.state ?? fallbackPayload.state,
+      status: parsed.status ?? parsed.Status ?? fallbackPayload.status ?? fallbackPayload.Status,
+      priority: parsed.priority ?? fallbackPayload.priority,
+    })
+  }
+
+  const tasks = parseLinearTasksOutput(raw)
+  if (tasks.length > 0) {
+    return normalizeLinearIssue(tasks[0])
+  }
+
   return null
 }
 
@@ -156,10 +251,22 @@ export function parseLinearMarkers(text) {
   const normalized = String(text ?? '').replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
   const markers = []
 
-  for (const payload of extractMarkerPayloads(normalized, 'LINEAR_ACTIVE')) {
-    const match = payload.match(/issue_id=([0-9a-f-]{36})/i)
-    if (match) {
-      markers.push({ type: 'active', issueId: match[1] })
+  const re = /^\s*(?:[-*]\s*)?\[(LINEAR_ACTIVE|LINEAR_DONE|LINEAR_NEW_TASK)\]\s*(.+)$/gim
+  for (const match of normalized.matchAll(re)) {
+    const kind = String(match[1] ?? '').trim()
+    const payload = String(match[2] ?? '').trim()
+    if (!payload) continue
+
+    if (kind === 'LINEAR_NEW_TASK') {
+      const parsed = tryParseJsonObject(payload)
+      if (parsed) markers.push({ type: 'new_task', payload: parsed })
+      continue
+    }
+
+    const markerType = kind === 'LINEAR_ACTIVE' ? 'active' : 'done'
+    const issueIdMatch = payload.match(/issue_id=([0-9a-f-]{36})/i)
+    if (issueIdMatch) {
+      markers.push({ type: markerType, issueId: issueIdMatch[1] })
       continue
     }
 
@@ -167,73 +274,30 @@ export function parseLinearMarkers(text) {
     if (parsed) {
       const issueId = String(parsed.issue_id ?? parsed.issueId ?? '').trim()
       if (issueId) {
-        markers.push({ type: 'active', issueId })
+        markers.push({ type: markerType, issueId })
         continue
       }
-      const identifier = String(parsed.identifier ?? '').trim().toUpperCase()
+      const identifier = normalizeIdentifier(parsed.identifier)
       if (identifier) {
-        markers.push({ type: 'active', identifier })
+        markers.push({ type: markerType, identifier })
         continue
       }
       const title = String(parsed.task ?? parsed.title ?? parsed.name ?? '').trim()
       if (title) {
-        markers.push({ type: 'active', title })
+        markers.push({ type: markerType, title })
         continue
       }
     }
 
     const identifier = parseIdentifierHint(payload)
     if (identifier) {
-      markers.push({ type: 'active', identifier })
+      markers.push({ type: markerType, identifier })
       continue
     }
 
     const title = parseTaskTitleHint(payload)
     if (title) {
-      markers.push({ type: 'active', title })
-    }
-  }
-
-  for (const payload of extractMarkerPayloads(normalized, 'LINEAR_DONE')) {
-    const match = payload.match(/issue_id=([0-9a-f-]{36})/i)
-    if (match) {
-      markers.push({ type: 'done', issueId: match[1] })
-      continue
-    }
-
-    const parsed = tryParseJsonObject(payload)
-    if (parsed) {
-      const issueId = String(parsed.issue_id ?? parsed.issueId ?? '').trim()
-      if (issueId) {
-        markers.push({ type: 'done', issueId })
-        continue
-      }
-      const identifier = String(parsed.identifier ?? '').trim().toUpperCase()
-      if (identifier) {
-        markers.push({ type: 'done', identifier })
-        continue
-      }
-      const title = String(parsed.task ?? parsed.title ?? parsed.name ?? '').trim()
-      if (title) {
-        markers.push({ type: 'done', title })
-        continue
-      }
-    }
-
-    const identifier = parseIdentifierHint(payload)
-    if (identifier) {
-      markers.push({ type: 'done', identifier })
-      continue
-    }
-
-    const title = parseTaskTitleHint(payload)
-    if (title) markers.push({ type: 'done', title })
-  }
-
-  for (const payload of extractMarkerPayloads(normalized, 'LINEAR_NEW_TASK')) {
-    const parsed = tryParseJsonObject(payload)
-    if (parsed) {
-      markers.push({ type: 'new_task', payload: parsed })
+      markers.push({ type: markerType, title })
     }
   }
 
@@ -259,52 +323,84 @@ export async function processLinearMarkers(config, markers, phaseId, openTasks =
   if (!config.integrations?.linear?.enabled) return { processed: false, count: 0 }
   if (!hasLinearAuth(config, options)) return { processed: false, count: 0 }
 
-  const titleToId = new Map()
-  const identifierToId = new Map()
-  for (const task of openTasks) {
-    const title = normalizeTitle(task.title)
-    if (title && !titleToId.has(title)) titleToId.set(title, task.id)
-    const identifier = String(task.identifier ?? '').trim().toUpperCase()
-    if (identifier && !identifierToId.has(identifier)) identifierToId.set(identifier, task.id)
-  }
+  const lookup = createTaskLookup(openTasks)
+  const activeStatus = activeStatusForPhase(phaseId)
+  const tasks = [...lookup.byId.values()]
 
   let count = 0
   for (const marker of markers) {
     try {
-      if (marker.type === 'active' && marker.issueId) {
-        const status = activeStatusForPhase(phaseId)
-        if (status) {
-          await runLinearCli(config, ['update-task', marker.issueId, JSON.stringify({ Status: status })], options)
-          count += 1
-        }
-      } else if (marker.type === 'active') {
-        const resolvedIssueId =
-          identifierToId.get(String(marker.identifier ?? '').trim().toUpperCase()) ||
-          titleToId.get(normalizeTitle(marker.title))
-        const status = activeStatusForPhase(phaseId)
-        if (resolvedIssueId && status) {
-          await runLinearCli(config, ['update-task', resolvedIssueId, JSON.stringify({ Status: status })], options)
-          count += 1
-        }
-      } else if (marker.type === 'done') {
-        const issueId =
-          marker.issueId ||
-          identifierToId.get(String(marker.identifier ?? '').trim().toUpperCase()) ||
-          titleToId.get(normalizeTitle(marker.title))
-        if (issueId) {
-          await runLinearCli(config, ['update-task', issueId, JSON.stringify({ Status: 'Done' })], options)
-          count += 1
-        }
-      } else if (marker.type === 'new_task' && marker.payload) {
-        await runLinearCli(config, ['create-task', JSON.stringify(marker.payload)], options)
+      if (marker.type === 'new_task' && marker.payload) {
+        const output = await runLinearCli(config, ['create-task', JSON.stringify(marker.payload)], options)
+        const createdTask =
+          parseCreatedTaskOutput(output, marker.payload) ??
+          normalizeLinearIssue({
+            ...marker.payload,
+            id: tryParseJsonObject(output)?.id,
+            status: marker.payload.Status ?? marker.payload.status,
+          })
+        const addedTask = addTaskToLookup(lookup, createdTask)
+        if (addedTask) tasks.push(addedTask)
         count += 1
+        continue
+      }
+
+      if (marker.type === 'active') {
+        const task = resolveMarkerTaskFromLookup(marker, lookup)
+        if (task?.id && activeStatus) {
+          await runLinearCli(config, ['update-task', task.id, JSON.stringify({ Status: activeStatus })], options)
+          addTaskToLookup(lookup, { ...task, status: activeStatus })
+          count += 1
+        }
+        continue
+      }
+
+      if (marker.type === 'done') {
+        const task = resolveMarkerTaskFromLookup(marker, lookup)
+        if (task?.id) {
+          await runLinearCli(config, ['update-task', task.id, JSON.stringify({ Status: 'Done' })], options)
+          addTaskToLookup(lookup, { ...task, status: 'Done' })
+          count += 1
+        }
       }
     } catch (error) {
       console.warn(`[Linear] Failed to process marker ${marker.type}: ${error?.message ?? String(error)}`)
     }
   }
 
-  return { processed: count > 0, count }
+  return {
+    processed: count > 0,
+    count,
+    tasks: [...lookup.byId.values()],
+  }
+}
+
+export async function resolveLinearTaskReference(config, marker, tasks = [], options = {}) {
+  if (!marker) return null
+
+  const lookup = createTaskLookup(tasks)
+  const matched = resolveMarkerTaskFromLookup(marker, lookup)
+  if (matched) return matched
+
+  if (marker.issueId) {
+    const normalizedIssueId = String(marker.issueId).trim()
+    const fetched = await queryLinearIssueById(config, normalizedIssueId, options)
+    if (fetched) return fetched
+    return { id: normalizedIssueId }
+  }
+
+  if (marker.identifier) {
+    return { identifier: normalizeIdentifier(marker.identifier) }
+  }
+
+  if (marker.title) {
+    const fallback = { title: String(marker.title).trim() }
+    const keyMatch = fallback.title.match(/([A-Z]+-\d+)/)
+    if (keyMatch) fallback.identifier = keyMatch[1]
+    return fallback
+  }
+
+  return null
 }
 
 export async function queryLinearIssueById(config, issueId, options = {}) {

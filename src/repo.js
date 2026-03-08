@@ -168,23 +168,26 @@ export async function listFilesChangedSinceSnapshot(repoDir, snapshot, options =
 }
 
 function formatAutoCommitMessage(ctx = {}) {
-  const phaseId = compactOneLine(ctx.phaseId || 'phase', 24).toLowerCase()
+  const scope = String(ctx.deliveryScope ?? '').trim().toLowerCase() || 'phase'
   const identifier = compactOneLine(ctx.activeTask?.identifier, 32)
+  const suffix = scope === 'turn'
+    ? 'sync turn changes'
+    : `sync ${compactOneLine(ctx.phaseId || 'phase', 24).toLowerCase()} changes`
 
   if (identifier) {
-    return `${identifier}: sync ${phaseId} changes`
+    return `${identifier}: ${suffix}`
   }
 
   const title = compactOneLine(ctx.activeTask?.title, 48)
   if (title) {
     const keyMatch = title.match(/([A-Z]+-\d+)/)
     if (keyMatch) {
-      return `${keyMatch[1]}: sync ${phaseId} changes`
+      return `${keyMatch[1]}: ${suffix}`
     }
-    return `chore: sync ${phaseId} changes for ${title}`
+    return `chore: ${suffix} for ${title}`
   }
 
-  return `chore: sync ${phaseId} changes`
+  return `chore: ${suffix}`
 }
 
 function validateCommitMessage(config, subject) {
