@@ -1404,6 +1404,65 @@ test('runLoop accepts reviewer-only LINEAR_ACTIVE binding when earlier phases om
   }
 })
 
+test('runLoop accepts review phase id for reviewer-only LINEAR_ACTIVE binding', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-review-alias-bind-'))
+  const issueId = 'abababab-abab-4bab-8bab-abababababab'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: issueId,
+      identifier: 'AIR-998',
+      title: 'Review alias fallback binding',
+      status: 'Todo',
+      priority: 'P1',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'implement',
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','implement\\n')"`
+        ),
+        buildShellPhase(
+          'review',
+          `node -e "console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['review'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.state.results[0].canonicalActiveTask.identifier, 'AIR-998')
+    assert.equal(result.state.results[0].deliverySummary.subject, 'AIR-998: sync turn changes')
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
+})
+
 test('runLoop checkpoints dirty worktree after later phase failure so the next turn can continue', async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-failure-checkpoint-'))
   const issueId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -1463,6 +1522,68 @@ test('runLoop checkpoints dirty worktree after later phase failure so the next t
     assert.equal(second.exitCode, 0)
     assert.notEqual(second.state.results[1].errorSummary, 'Working tree dirty at turn start')
     assert.equal(second.state.results[1].deliverySummary.error, null)
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
+})
+
+test('runLoop checkpoints quoted filenames without mangling pathspecs', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-quoted-checkpoint-'))
+  const issueId = 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: issueId,
+      identifier: 'AIR-701',
+      title: 'Checkpoint quoted filename changes',
+      status: 'Todo',
+      priority: 'P1',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.writeFileSync('a \\"b\\".txt','quoted\\n'); console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+        ),
+        buildShellPhase(
+          'build',
+          `node -e "process.exit(7)"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['executor'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 2)
+    assert.equal(result.state.results[0].deliverySummary.checkpointCommitted, true)
+
+    const showHead = await runLocalCommand('git show --name-only --pretty=format:%s HEAD', repoDir)
+    assert.match(showHead, /^AIR-701: sync recovery changes/)
+    assert.match(showHead, /a \\"b\\"\.\w+/)
   } finally {
     if (previousApiKey == null) delete process.env.LINEAR_API_KEY
     else process.env.LINEAR_API_KEY = previousApiKey

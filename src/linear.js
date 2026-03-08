@@ -181,9 +181,10 @@ function parseCreatedTaskOutput(output, fallbackPayload = {}) {
 }
 
 function activeStatusForPhase(phaseId) {
-  if (phaseId === 'coordinator' || phaseId === 'strategist') return 'Coordinating'
-  if (phaseId === 'executor') return 'Executing'
-  if (phaseId === 'reviewer') return 'In Review'
+  const normalized = String(phaseId ?? '').trim().toLowerCase()
+  if (normalized === 'coordinator' || normalized === 'strategist') return 'Coordinating'
+  if (normalized === 'executor') return 'Executing'
+  if (normalized.includes('review')) return 'In Review'
   return null
 }
 

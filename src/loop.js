@@ -200,7 +200,7 @@ function tasksMatch(left, right) {
 
 function canBindCanonicalTask(phaseId) {
   const normalized = String(phaseId ?? '').trim().toLowerCase()
-  return normalized === 'strategist' || normalized === 'executor' || normalized === 'reviewer'
+  return normalized === 'strategist' || normalized === 'executor' || isReviewerPhase(phaseId)
 }
 
 function hasReviewerValidationFailure(result) {
