@@ -183,7 +183,7 @@ function parseCreatedTaskOutput(output, fallbackPayload = {}) {
 function activeStatusForPhase(phaseId) {
   const normalized = String(phaseId ?? '').trim().toLowerCase()
   if (normalized === 'coordinator' || normalized === 'strategist') return 'Coordinating'
-  if (normalized === 'executor') return 'Executing'
+  if (normalized === 'executor' || normalized === 'implement') return 'Executing'
   if (normalized.includes('review')) return 'In Review'
   return null
 }

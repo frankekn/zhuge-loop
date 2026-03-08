@@ -294,7 +294,6 @@ export async function commitWorkingTreeIfDirty(config, ctx = {}) {
       env
     ).catch(() => {})
   }
-
   const stagedNames = await requireSuccess('git diff --cached --name-only', cwd, 5_000, env).catch(() => '')
   if (!String(stagedNames).trim()) {
     return { committed: false, skippedReason: 'only ignored paths changed' }
