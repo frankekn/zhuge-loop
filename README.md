@@ -167,7 +167,7 @@ If you use Kiro, phases can run through ACP first and fall back to `kiro-cli-cha
 Kiro phases automatically receive repo context and the previous phase handoff in their composed prompt.
 Shell phases receive the same inputs via `ZHUGE_REPO_CONTEXT`, `ZHUGE_REPO_CONTEXT_PATH`, `ZHUGE_HANDOFF`, and `ZHUGE_HANDOFF_PATH`.
 If `integrations.linear.enabled=true`, the runtime can query active Linear tasks, inject them into selected Kiro phases, and process `[LINEAR_NEW_TASK]`, `[LINEAR_ACTIVE]`, and `[LINEAR_DONE]` markers from phase output.
-If `repoPolicy.autoCommitAfterEachPhase=true`, the runtime can auto-commit changed files after a successful phase; with `autoPushAfterEachPhase=true`, it also pushes the delivery branch automatically.
+If `repoPolicy.autoCommitAfterEachPhase=true`, the runtime can create local recovery/checkpoint commits to keep the worktree resumable. With `autoPushAfterEachPhase=true`, it pushes the delivery branch only after the full turn passes its required gates.
 
 Legacy configs that use top-level `command` inside phases are still supported.
 New configs should prefer `phase.run`.
@@ -204,7 +204,7 @@ node src/cli.js run
 這個工具本身不依賴 OpenClaw。phase 可以是 shell 指令，也可以是 Kiro phase。
 Kiro phase 會自動拿到每輪 repo context 與上一 phase 的 handoff；shell phase 則透過環境變數拿到相同資訊。
 若啟用 Linear integration，runtime 也會查詢目前任務、把任務清單注入指定 phase，並自動處理 `[LINEAR_NEW_TASK]` / `[LINEAR_ACTIVE]` / `[LINEAR_DONE]` markers。
-若啟用 `repoPolicy.autoCommitAfterEachPhase` / `autoPushAfterEachPhase`，runtime 會在 phase 成功後自動 commit / push。
+若啟用 `repoPolicy.autoCommitAfterEachPhase` / `autoPushAfterEachPhase`，runtime 可能建立本地 recovery/checkpoint commit 來避免髒工作樹卡死；只有整輪 gate 通過後才會 push。
 
 ---
 

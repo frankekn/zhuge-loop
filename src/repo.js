@@ -95,6 +95,20 @@ function filterStatusOutput(text, ignoredPaths) {
     .join('\n')
 }
 
+async function listChangedPaths(cwd, env = process.env, ignoredPaths = []) {
+  const status = await requireSuccess('git status --porcelain=v1', cwd, 5_000, env).catch(() => '')
+  const files = new Set()
+
+  for (const line of String(status ?? '').split('\n').filter(Boolean)) {
+    for (const filePath of extractStatusPaths(line)) {
+      if (shouldIgnorePath(filePath, ignoredPaths)) continue
+      files.add(filePath)
+    }
+  }
+
+  return [...files].sort()
+}
+
 export async function captureWorktreeSnapshot(repoDir, options = {}) {
   const env = options.env ?? process.env
   const ignoredPaths = normalizeIgnoredPaths(options.ignorePaths)
@@ -281,10 +295,21 @@ export async function commitWorkingTreeIfDirty(config, ctx = {}) {
 
   const cwd = config.repoDir
   const env = ctx.env ?? process.env
+  const ignoredPaths = normalizeIgnoredPaths(ctx.ignorePaths)
   const clean = await isWorkingTreeClean(cwd, env)
   if (clean) return { committed: false }
 
-  await requireSuccess('git add -A', cwd, 10_000, env)
+  const changedPaths = await listChangedPaths(cwd, env, ignoredPaths)
+  if (changedPaths.length === 0) {
+    return { committed: false, skippedReason: 'only ignored paths changed' }
+  }
+
+  await requireSuccess(
+    `git add -A -- ${changedPaths.map((filePath) => JSON.stringify(filePath)).join(' ')}`,
+    cwd,
+    10_000,
+    env
+  )
   const stagedNames = await requireSuccess('git diff --cached --name-only', cwd, 5_000, env).catch(() => '')
   if (!String(stagedNames).trim()) {
     throw new Error('working tree is dirty but nothing is staged for commit')

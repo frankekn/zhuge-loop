@@ -61,7 +61,7 @@
   ],
   "profiles": {
     "uiux": {
-      "description": "Standalone zhuge-loop live UI/UX pipeline with injected repo context, injected Linear task context, Linear marker sync, and runtime-managed commit/push.",
+      "description": "Standalone zhuge-loop live UI/UX pipeline with injected repo context, injected Linear task context, Linear marker sync, runtime-managed recovery checkpoints, and final gated push.",
       "phases": [
         {
           "id": "strategist",
@@ -78,7 +78,7 @@
           "run": {
             "kind": "kiro",
             "agent": "lusu",
-            "prompt": "HARD RULE - RUNTIME 協作約定：\n- strategist handoff、repo context、當前 Linear 任務清單、以及上一 phase 的重點輸出都已經注入到 prompt；直接沿著 handoff 實作。\n- 不要執行 git add/commit/push；loop runtime 會在 phase 成功且工作樹有變更時，自動依目前 active Linear task commit/push 到 agent-dev。\n- 如果 handoff 內沒有明確 active issue，先從 prompt 上方的 Linear task list 選定一個任務，再輸出 `[LINEAR_ACTIVE] issue_id=<uuid>`、`identifier=AIR-123`、或 `title=<exact task title>` 其中一種，再開始改 code；不要做沒有 issue 綁定的修改。\n- 需要新增後續任務或完成任務時，用 [LINEAR_NEW_TASK] / [LINEAR_DONE] marker 交給 runtime，同步由 runtime 處理。\n- [LINEAR_DONE] 可用 issue_id=<uuid> 或 identifier=AIR-123。\n\nHARD RULE: 絕對不可以執行 Playwright / E2E 測試（包含 pnpm test:e2e:chromium、npx playwright test、npm run dev 等）。只允許 pnpm test --run <相關 test 檔案>（針對性 vitest）和 pnpm build。可以新增 Playwright guardrail 測試檔，但不要在這個 phase 執行它。禁止跑無參數的 pnpm test --run 全套測試。\n\n依 strategist 方案實作。要求：先修 P0 blocker（遮擋 / 假可點 / 無痛回來），再處理其他美化。同時處理產品級細節：修掉 aircraft icon 鋸齒（資產 / 渲染策略），機場 marker 換 pin 並做 selected 狀態；檢查 Dashboard top bar 下方第一個互動元件的可視性 / 可點性。任何假 affordance 直接拔掉。\n\n測試與驗收要求：\n- 補齊針對這次切片的 guardrail；能用 vitest 鎖的先用 vitest，真的需要 Playwright 時只新增檔案，不在這個 phase 執行。\n- 實際執行只做：相關 vitest、必要時 pnpm build。\n- 如果這一 phase 已經把 active issue 真正做完，最後補 [LINEAR_DONE] issue_id=<id>；如果還沒完成，不要關閉。"
+            "prompt": "HARD RULE - RUNTIME 協作約定：\n- strategist handoff、repo context、當前 Linear 任務清單、以及上一 phase 的重點輸出都已經注入到 prompt；直接沿著 handoff 實作。\n- 不要執行 git add/commit/push；loop runtime 會管理 commit/push。必要時 runtime 可能建立本地 recovery checkpoint，但只有在 reviewer + typecheck + vitest + build 全部通過後才會 push 到 agent-dev，且只有在交付成功後才會同步 [LINEAR_DONE]。\n- 如果 handoff 內沒有明確 active issue，先從 prompt 上方的 Linear task list 選定一個任務，再輸出 `[LINEAR_ACTIVE] issue_id=<uuid>`、`identifier=AIR-123`、或 `title=<exact task title>` 其中一種，再開始改 code；不要做沒有 issue 綁定的修改。\n- 需要新增後續任務或完成任務時，用 [LINEAR_NEW_TASK] / [LINEAR_DONE] marker 交給 runtime，同步由 runtime 處理。\n- [LINEAR_DONE] 可用 issue_id=<uuid> 或 identifier=AIR-123。\n\nHARD RULE: 絕對不可以執行 Playwright / E2E 測試（包含 pnpm test:e2e:chromium、npx playwright test、npm run dev 等）。只允許 pnpm test --run <相關 test 檔案>（針對性 vitest）和 pnpm build。可以新增 Playwright guardrail 測試檔，但不要在這個 phase 執行它。禁止跑無參數的 pnpm test --run 全套測試。\n\n依 strategist 方案實作。要求：先修 P0 blocker（遮擋 / 假可點 / 無痛回來），再處理其他美化。同時處理產品級細節：修掉 aircraft icon 鋸齒（資產 / 渲染策略），機場 marker 換 pin 並做 selected 狀態；檢查 Dashboard top bar 下方第一個互動元件的可視性 / 可點性。任何假 affordance 直接拔掉。\n\n測試與驗收要求：\n- 補齊針對這次切片的 guardrail；能用 vitest 鎖的先用 vitest，真的需要 Playwright 時只新增檔案，不在這個 phase 執行。\n- 實際執行只做：相關 vitest、必要時 pnpm build。\n- 如果這一 phase 已經把 active issue 真正做完，最後補 [LINEAR_DONE] issue_id=<id>；如果還沒完成，不要關閉。"
           },
           "timeoutMs": 1200000,
           "allowFailure": false
@@ -88,7 +88,7 @@
           "run": {
             "kind": "kiro",
             "agent": "huangzhong",
-            "prompt": "HARD RULE - RUNTIME 協作約定：\n- review input 已包含 repo context、當前 Linear 任務清單、以及前一 phase handoff；直接審查目前工作樹、最新變更與驗收風險。\n- 不要執行 git add/commit/push；runtime 會處理。\n- 若 handoff 沒有清楚標示 active issue，可從 prompt 上方的 Linear task list 補一個 `[LINEAR_ACTIVE] issue_id=<uuid>`、`identifier=AIR-123`、或 `title=<exact task title>`，讓 runtime 知道這輪 commit 應綁哪個任務。\n- 若確認 active issue 真正完成，可輸出 [LINEAR_DONE] issue_id=<uuid> 或 identifier=AIR-123；若未完成，不要關閉，直接列阻塞與回修清單。\n\nHARD RULE: 絕對不可以執行 Playwright / E2E 測試（包含 pnpm test:e2e:chromium、npx playwright test、npm run dev 等）。只允許 pnpm test --run <相關 test 檔案>（針對性 vitest）和 pnpm build。可以要求補 Playwright guardrail，但不要在這個 phase 執行 E2E。\n\n用 P0 不變量審查：遮擋 = fail；假可點 = fail；回來看不到結果 = fail。並強制驗收 120% DoD：視覺走查（截圖 + vision review）四維度任一 < 9/10 或出現任何 P0 issue 都視為未完成，必須回去修，不能宣稱完成。\n\n同時檢查：\n- guardrail 是否足夠鎖死這次回歸\n- executor 是否偷偷引入假 affordance / 新遮擋 / 不可觀測狀態\n- repo 內容是否引入 emoji\n\n如果未完成，輸出最小回修清單；如果真的完成，再補 [LINEAR_DONE] issue_id=<id>。"
+            "prompt": "HARD RULE - RUNTIME 協作約定：\n- review input 已包含 repo context、當前 Linear 任務清單、以及前一 phase handoff；直接審查目前工作樹、最新變更與驗收風險。\n- 不要執行 git add/commit/push；runtime 會處理。\n- 若 handoff 沒有清楚標示 active issue，且前面 phase 尚未綁定 canonical issue，可從 prompt 上方的 Linear task list 補一個 `[LINEAR_ACTIVE] issue_id=<uuid>`、`identifier=AIR-123`、或 `title=<exact task title>`，讓 runtime 知道這輪交付應綁哪個任務。\n- 若確認 active issue 真正完成，可輸出 [LINEAR_DONE] issue_id=<uuid> 或 identifier=AIR-123；若未完成，不要關閉，直接列阻塞與回修清單。\n\nHARD RULE: 絕對不可以執行 Playwright / E2E 測試（包含 pnpm test:e2e:chromium、npx playwright test、npm run dev 等）。只允許 pnpm test --run <相關 test 檔案>（針對性 vitest）和 pnpm build。可以要求補 Playwright guardrail，但不要在這個 phase 執行 E2E。\n\n用 P0 不變量審查：遮擋 = fail；假可點 = fail；回來看不到結果 = fail。並強制驗收 120% DoD：視覺走查（截圖 + vision review）四維度任一 < 9/10 或出現任何 P0 issue 都視為未完成，必須回去修，不能宣稱完成。\n\n同時檢查：\n- guardrail 是否足夠鎖死這次回歸\n- executor 是否偷偷引入假 affordance / 新遮擋 / 不可觀測狀態\n- repo 內容是否引入 emoji\n\n如果未完成，輸出最小回修清單；如果真的完成，再補 [LINEAR_DONE] issue_id=<id>。"
           },
           "timeoutMs": 900000,
           "allowFailure": false

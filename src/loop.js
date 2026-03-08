@@ -200,7 +200,7 @@ function tasksMatch(left, right) {
 
 function canBindCanonicalTask(phaseId) {
   const normalized = String(phaseId ?? '').trim().toLowerCase()
-  return normalized === 'strategist' || normalized === 'executor'
+  return normalized === 'strategist' || normalized === 'executor' || normalized === 'reviewer'
 }
 
 function hasReviewerValidationFailure(result) {
@@ -245,6 +245,39 @@ function basenameWithoutCompoundExt(filePath) {
   return name.replace(/\.(test|spec)\.[^.]+$/i, '').replace(/\.[^.]+$/i, '')
 }
 
+function sourcePathStem(filePath) {
+  return String(filePath ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\.[^.]+$/i, '')
+}
+
+function testPathStem(filePath) {
+  return String(filePath ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\.(test|spec)\.[^.]+$/i, '')
+}
+
+function candidateTestStemsForSource(filePath) {
+  const stem = sourcePathStem(filePath)
+  if (!stem) return []
+
+  const candidates = new Set([stem])
+  const base = path.posix.basename(stem)
+  candidates.add(`tests/${base}`)
+  candidates.add(`test/${base}`)
+
+  if (stem.startsWith('src/')) {
+    const mirrored = stem.slice(4)
+    candidates.add(`tests/${mirrored}`)
+    candidates.add(`test/${mirrored}`)
+    candidates.add(`__tests__/${mirrored}`)
+  }
+
+  return [...candidates]
+}
+
 function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort()
 }
@@ -253,6 +286,15 @@ function resolveVitestTargetsForChanges(changedFiles, repoFiles) {
   const testFiles = repoFiles.filter((filePath) => isVitestFile(filePath))
   const repoFileSet = new Set(repoFiles)
   const selected = new Set()
+  const testsByStem = new Map()
+
+  for (const candidate of testFiles) {
+    const stem = testPathStem(candidate)
+    if (!stem) continue
+    const matches = testsByStem.get(stem) ?? []
+    matches.push(candidate)
+    testsByStem.set(stem, matches)
+  }
 
   for (const filePath of changedFiles) {
     if (isVitestFile(filePath) && repoFileSet.has(filePath)) {
@@ -264,6 +306,11 @@ function resolveVitestTargetsForChanges(changedFiles, repoFiles) {
 
     const directory = path.posix.dirname(filePath)
     const base = basenameWithoutCompoundExt(filePath)
+    for (const stem of candidateTestStemsForSource(filePath)) {
+      for (const match of testsByStem.get(stem) ?? []) {
+        selected.add(match)
+      }
+    }
     const localMatches = testFiles.filter((candidate) => {
       const candidateDir = path.posix.dirname(candidate)
       const candidateBase = basenameWithoutCompoundExt(candidate)
@@ -580,6 +627,35 @@ async function runTurn(config, state, turnDir, options = {}) {
       env: process.env,
     })
     return rememberResolvedTask(resolved)
+  }
+  const checkpointDirtyWorktree = async (reasonLabel = 'recovery') => {
+    if (!config.repoPolicy?.autoCommitAfterEachPhase) return
+
+    const snapshot = await captureWorktreeSnapshot(config.repoDir, {
+      env: process.env,
+      ignorePaths: ignoredRepoPaths,
+    })
+    if (!snapshot?.status?.trim()) return
+
+    if (config.integrations?.linear?.enabled && !canonicalActiveTask) {
+      deliverySummary.checkpointError = 'checkpoint skipped: no canonical task binding'
+      return
+    }
+
+    const checkpointResult = await commitWorkingTreeIfDirty(config, {
+      env: process.env,
+      activeTask: canonicalActiveTask,
+      phaseId: reasonLabel,
+      turnLabel,
+      ignorePaths: ignoredRepoPaths,
+    })
+    if (checkpointResult.committed) {
+      deliverySummary.checkpointCommitted = true
+      deliverySummary.checkpointSubject = checkpointResult.subject
+      return
+    }
+
+    deliverySummary.checkpointError = checkpointResult.skippedReason ?? 'checkpoint commit skipped'
   }
 
   try {
@@ -920,6 +996,7 @@ async function runTurn(config, state, turnDir, options = {}) {
       phaseResults.push(phaseResult)
 
       if (result.code !== 0 && !phase.allowFailure) {
+        await checkpointDirtyWorktree('recovery')
         const baseError = phaseRun?.kind === 'vitestChanged'
           ? `Phase ${phase.id} failed: ${String(result.err ?? result.out ?? '').trim() || `code ${result.code}`}`
           : `Phase ${phase.id} failed with code ${result.code}`
@@ -974,6 +1051,7 @@ async function runTurn(config, state, turnDir, options = {}) {
         activeTask: canonicalActiveTask,
         deliveryScope: 'turn',
         turnLabel,
+        ignorePaths: ignoredRepoPaths,
       })
       if (!commitResult.committed && config.repoPolicy?.autoCommitAfterEachPhase) {
         throw new Error(commitResult.skippedReason ?? 'delivery commit did not complete')
@@ -1054,6 +1132,7 @@ async function runTurn(config, state, turnDir, options = {}) {
     await writeTurnResultMarkdown(turnDir, turnResult)
     return turnResult
   } catch (error) {
+    await checkpointDirtyWorktree('recovery').catch(() => {})
     deliverySummary.error = error?.message ?? String(error)
     const turnResult = createFailureTurnResult(
       state,

@@ -1182,7 +1182,7 @@ test('runLoop defers LINEAR_DONE until delivery succeeds', async () => {
       [
         buildShellPhase(
           'executor',
-          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n'); console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt',process.env.ZHUGE_TURN + '\\n'); console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
         ),
         buildShellPhase(
           'reviewer',
@@ -1223,7 +1223,8 @@ test('runLoop defers LINEAR_DONE until delivery succeeds', async () => {
 
     assert.deepEqual(linearLog.map((entry) => entry.patch?.Status ?? entry.command), ['Executing'])
     const headSubject = await runLocalCommand('git log -1 --pretty=%s', repoDir)
-    assert.equal(headSubject, 'chore: initial commit')
+    assert.equal(headSubject, 'AIR-888: sync recovery changes')
+    assert.equal(result.state.results[0].deliverySummary.checkpointCommitted, true)
   } finally {
     if (previousApiKey == null) delete process.env.LINEAR_API_KEY
     else process.env.LINEAR_API_KEY = previousApiKey
@@ -1282,6 +1283,42 @@ test('runLoop resolves and runs vitestChanged targets from changed source files'
   }
 })
 
+test('runLoop resolves mirrored tests/*.test.* files for vitestChanged', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-vitest-mirrored-'))
+  await initGitRepoWithRemote(repoDir)
+  const pnpmLogPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-pnpm-log-')), 'pnpm.log')
+  const { binDir } = await createFakePnpm(pnpmLogPath)
+  const previousPath = process.env.PATH
+  process.env.PATH = `${binDir}:${previousPath ?? ''}`
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.mkdirSync('src',{recursive:true}); fs.mkdirSync('tests',{recursive:true}); fs.writeFileSync('src/feature.ts','export const feature = 1\\n'); fs.writeFileSync('tests/feature.test.ts','import { test } from \\'node:test\\'\\n')"`
+        ),
+        {
+          id: 'vitest',
+          run: { kind: 'vitestChanged' },
+          timeoutMs: 3000,
+          allowFailure: false,
+        },
+      ]
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+    assert.deepEqual(result.state.results[0].phases[1].resolvedTests, ['tests/feature.test.ts'])
+
+    const pnpmLog = await fs.readFile(pnpmLogPath, 'utf8')
+    assert.match(pnpmLog, /test --run tests\/feature\.test\.ts/)
+  } finally {
+    process.env.PATH = previousPath
+  }
+})
+
 test('runLoop fails vitestChanged when no tests resolve for changed files', async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-vitest-empty-'))
   await initGitRepoWithRemote(repoDir)
@@ -1306,4 +1343,128 @@ test('runLoop fails vitestChanged when no tests resolve for changed files', asyn
   assert.equal(result.exitCode, 2)
   assert.match(result.state.results[0].errorSummary, /no_resolved_tests_for_changed_files/)
   assert.deepEqual(result.state.results[0].phases[1].resolvedTests, [])
+})
+
+test('runLoop accepts reviewer-only LINEAR_ACTIVE binding when earlier phases omitted it', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-reviewer-bind-'))
+  const issueId = '99999999-9999-4999-8999-999999999999'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: issueId,
+      identifier: 'AIR-999',
+      title: 'Reviewer fallback binding',
+      status: 'Todo',
+      priority: 'P1',
+    },
+  ])
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n')"`
+        ),
+        buildShellPhase(
+          'reviewer',
+          `node -e "console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['executor', 'reviewer'],
+          },
+        },
+      }
+    )
+
+    const result = await runLoop(config, { once: true })
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.state.results[0].canonicalActiveTask.identifier, 'AIR-999')
+    assert.equal(result.state.results[0].deliverySummary.subject, 'AIR-999: sync turn changes')
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
+})
+
+test('runLoop checkpoints dirty worktree after later phase failure so the next turn can continue', async () => {
+  const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-failure-checkpoint-'))
+  const issueId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  await initGitRepoWithRemote(repoDir)
+  const { cliPath: linearCliPath } = await createFakeLinearCli(repoDir, [
+    {
+      id: issueId,
+      identifier: 'AIR-700',
+      title: 'Checkpoint failed turn changes',
+      status: 'Todo',
+      priority: 'P1',
+    },
+  ])
+  const buildFlagPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'zhuge-loop-build-flag-')), 'fail-once.flag')
+
+  const previousApiKey = process.env.LINEAR_API_KEY
+  process.env.LINEAR_API_KEY = 'test-linear-key'
+
+  try {
+    const config = buildLoopConfig(
+      repoDir,
+      [
+        buildShellPhase(
+          'executor',
+          `node -e "const fs=require('fs'); fs.writeFileSync('feature.txt','executor\\n'); console.log('[LINEAR_ACTIVE] issue_id=${issueId}')"`
+        ),
+        buildShellPhase(
+          'build',
+          `FLAG=${JSON.stringify(buildFlagPath)} node -e "const fs=require('fs'); if (!fs.existsSync(process.env.FLAG)) { fs.writeFileSync(process.env.FLAG,'1'); process.exit(7) } console.log('build ok')"`
+        ),
+      ],
+      {
+        repoPolicy: {
+          onDirty: 'warn',
+          autoCommitAfterEachPhase: true,
+          autoPushAfterEachPhase: false,
+          requireConventionalCommits: true,
+          commitMessageMaxLen: 100,
+          requireIssueKeyRegex: 'AIR-\\d+',
+        },
+        integrations: {
+          linear: {
+            enabled: true,
+            cliPath: linearCliPath,
+            promptPhaseIds: ['executor'],
+          },
+        },
+      }
+    )
+
+    const first = await runLoop(config, { once: true })
+    assert.equal(first.exitCode, 2)
+    assert.equal(first.state.results[0].deliverySummary.checkpointCommitted, true)
+    assert.equal(first.state.results[0].deliverySummary.checkpointSubject, 'AIR-700: sync recovery changes')
+
+    const second = await runLoop(config, { once: true })
+    assert.equal(second.exitCode, 0)
+    assert.notEqual(second.state.results[1].errorSummary, 'Working tree dirty at turn start')
+    assert.equal(second.state.results[1].deliverySummary.error, null)
+  } finally {
+    if (previousApiKey == null) delete process.env.LINEAR_API_KEY
+    else process.env.LINEAR_API_KEY = previousApiKey
+  }
 })
