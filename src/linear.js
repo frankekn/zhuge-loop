@@ -203,8 +203,26 @@ export function parseLinearMarkers(text) {
 
     const parsed = tryParseJsonObject(payload)
     if (parsed) {
+      const issueId = String(parsed.issue_id ?? parsed.issueId ?? '').trim()
+      if (issueId) {
+        markers.push({ type: 'done', issueId })
+        continue
+      }
+      const identifier = String(parsed.identifier ?? '').trim().toUpperCase()
+      if (identifier) {
+        markers.push({ type: 'done', identifier })
+        continue
+      }
       const title = String(parsed.task ?? parsed.title ?? parsed.name ?? '').trim()
-      if (title) markers.push({ type: 'done', title })
+      if (title) {
+        markers.push({ type: 'done', title })
+        continue
+      }
+    }
+
+    const identifier = parseIdentifierHint(payload)
+    if (identifier) {
+      markers.push({ type: 'done', identifier })
       continue
     }
 
@@ -269,7 +287,10 @@ export async function processLinearMarkers(config, markers, phaseId, openTasks =
           count += 1
         }
       } else if (marker.type === 'done') {
-        const issueId = marker.issueId || titleToId.get(normalizeTitle(marker.title))
+        const issueId =
+          marker.issueId ||
+          identifierToId.get(String(marker.identifier ?? '').trim().toUpperCase()) ||
+          titleToId.get(normalizeTitle(marker.title))
         if (issueId) {
           await runLinearCli(config, ['update-task', issueId, JSON.stringify({ Status: 'Done' })], options)
           count += 1

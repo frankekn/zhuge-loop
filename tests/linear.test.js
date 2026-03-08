@@ -19,6 +19,20 @@ test('parseLinearMarkers accepts active markers by issue id, identifier, and tit
   ])
 })
 
+test('parseLinearMarkers accepts done markers by issue_id, identifier, and title', () => {
+  const markers = parseLinearMarkers(`
+[LINEAR_DONE] issue_id=22222222-2222-4222-8222-222222222222
+[LINEAR_DONE] identifier=AIR-793
+[LINEAR_DONE] title=Some task title
+`)
+
+  assert.deepEqual(markers, [
+    { type: 'done', issueId: '22222222-2222-4222-8222-222222222222' },
+    { type: 'done', identifier: 'AIR-793' },
+    { type: 'done', title: 'Some task title' },
+  ])
+})
+
 test('buildLinearContext keeps workflow statuses visible as active tasks', () => {
   const context = buildLinearContext([
     {
